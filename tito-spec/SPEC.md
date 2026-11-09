@@ -11,6 +11,8 @@ Authoritative source docs (wins, in order): `tito-selfhost-PLAN-LOCKED.md`,
 checked against this repo's real code; the reconciliation table is at the bottom. Where a doc's
 line drifted or pointed into the OWUI repo (not present here), the real location is used and noted.
 
+Reviewer fixes (orc decisions C1–C3, P1–P6) are folded in here; they supersede the prior wording.
+
 ---
 
 ## 0. Non-goals / explicitly out of scope
@@ -21,50 +23,47 @@ line drifted or pointed into the OWUI repo (not present here), the real location
 - No pricing-table changes for advisor iterations / Sonnet-5.5 cache-read rate (vet H6.2/H6.3 are
   *accuracy* notes on `cost_usd`; the budget gate consumes whatever `cost_usd` records. Accepted risk.)
 
-## 1. Decisions (proposed; confirm before build)
+## 1. Decisions (final, from orc)
 
-D1 — **"tito" is the last path segment of the requested model id.** `is_tito = model_name.split("/")[-1] == "tito"`.
-    Robust whether OWUI sends `tito`, `anthropic/tito` or `anthropic_new/tito`. (There is currently
-    **no** tito→base mapping anywhere in the pipe; `body["model"]="tito"` today reaches Anthropic as
-    model `"tito"` and 400s.)
+D1 — **Gate = `__metadata__["model"]["id"] == "tito"`.** OWUI `functions.py:265-266` rewrites the
+    body model to the base model id, so the pipe **never** sees `"tito"` in `body["model"]`.
+    There is **no remap** in the pipe: `body["model"]` is already `claude-sonnet-5-5`.
+    **VERIFY-AT-RUNTIME** (the `functions.py:265-266` / `main.py:1343` cites are OWUI-repo, not in
+    this workdir): confirm before build that `__metadata__["model"]["id"] == "tito"` is populated on
+    every Tito request. `_is_tito(metadata) = (metadata or {}).get("model", {}).get("id") == "tito"`.
 
-D2 — **The pipe remaps tito → `TITO_CONFIG["base_model"] = "claude-sonnet-5-5"`** for the API call and
-    for `get_model_info`, *before* any capability/effort/thinking logic. `get_model_info("tito")`
-    currently returns the generic defaults (no effort, no adaptive thinking); capabilities must come
-    from the base model.
+D2 — **Status marker = TOP-LEVEL key on the message dict**, shared by pipe and OWUI:
+    `{"role":"system","content":[…],"mid_conversation":true}`. Not `meta.mid_conversation`.
 
 D3 — **`TITO_CONFIG` is a single frozen dict, not UserValves.** For `tito` the pipe ignores
     `__user__["valves"]` *and* `pipe.valves` for every key the dict covers. Keys not in the dict fall
-    through to existing valve behavior (minimizes churn).
+    through to existing valve behavior.
 
-D4 — **Mid-conversation status marker = `msg["meta"]["mid_conversation"]` truthy** (set by OWUI PATCH C,
-    out of scope here). The pipe-side contract is: a `role:"system"` message whose
-    `meta.mid_conversation` is truthy is a *status* message, passed through as a top-level
-    `role:"system"` message in `messages[]` (never folded into `system`), with
-    `clear_at:"next_user_message"`.
+D4 — **`TITO_ACTIVE` ContextVar** (set once in `pipe()` from `_is_tito(__metadata__)`), mirroring the
+    existing `SLIM_OUTPUT`/`HIDDEN_BLOCKS` pattern. Deep methods without metadata
+    (`_convert_messages_to_claude_format`, `_cache_control_marker`, `_apply_cache_control`,
+    `_cache_last_stable_message`) read `TITO_ACTIVE.get()`.
 
 D5 — **New module `src/anthropic_pipe/tito.py`**, a self-contained method-group mixin
-    (`class PipeTitoMethods`) with no `open_webui`/`anthropic` imports at module level (so it loads
-    standalone for tests). Added to `METHOD_GROUP_SOURCES` in `helpers/build_anthropic_pipe.py`.
+    (`class PipeTitoMethods`) with `contextvars` imported at its top (pipe_template already imports it;
+    the standalone file needs its own import for tests). Added to `METHOD_GROUP_SOURCES` in
+    `helpers/build_anthropic_pipe.py`.
 
 ---
 
 ## 2. PATCH B — fixed config for "tito" (vet B1 + PLAN "PATCH B")
 
-New module constant:
-
 ```python
 TITO_CONFIG = {
-    "base_model": "claude-sonnet-5-5",
-    "thinking": {"type": "adaptive"},          # fixed; display key never added for tito
+    "thinking": {"type": "adaptive"},          # fixed; no display key, no budget_tokens
     "effort": "medium",                        # fixed; body.reasoning_effort is ignored
     "advisor": {"enabled": True, "model": "claude-opus-5-5", "max_uses": 3, "caching": "5m"},
     "enable_tool_search": False,               # no defer_loading, no tool_search_tool_*
     "hide_blocks": ["advisor", "web_search", "web_fetch"],
     "web_search_max_uses": 10,
     "web_fetch_max_uses": 5,                   # unchanged from default; pinned for stability
-    "user_location": {"city": "Fresno"},       # only non-empty fields are sent (tools.py:214-227)
-    "cache": {"tools_system_ttl": "1h", "messages_ttl": "1h"},
+    "user_location": {"city": "Fresno"},       # only non-empty fields sent (tools.py:214-227)
+    "cache": {"ttl": "1h", "tools_breakpoint": False, "system_breakpoints": 2},  # see P6
     "show_cost": True,
     "strip_reasoning_effort": True,
     "skip_tool_search_nudge": True,            # payload.py:704-731
@@ -73,115 +72,126 @@ TITO_CONFIG = {
 }
 ```
 
-### 2.1 Model remap + effort + thinking (payload.py)
-- In `create_request_payload` (payload.py), immediately after `actual_model_name` is computed
-  (payload.py:30), add: if `pipe._is_tito(actual_model_name)` → `actual_model_name = TITO_CONFIG["base_model"]`.
+### 2.1 Effort + thinking (payload.py)
 - Effort (payload.py:78-84): when tito, skip `body.get("reasoning_effort")` entirely and set
   `effective_effort = "medium"`; `output_config = {"effort": "medium"}`.
 - Thinking (payload.py:88-143): when tito, force `enable_thinking = True` and emit
-  `thinking = {"type": "adaptive"}` (sonnet-5-5 supports adaptive thinking; no budget_tokens, no display key).
+  `thinking = {"type": "adaptive"}` (sonnet-5-5 supports adaptive thinking).
 - No terminal hint, no tool-search nudge for tito (guard both blocks).
 
 ### 2.2 Tools (tools.py)
 - `_convert_tools_to_claude_format` (tools.py): when tito —
   - advisor tool built from `TITO_CONFIG["advisor"]` regardless of `ENABLE_ADVISOR_TOOL`;
     `{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5-5","max_uses":3,"caching":{"type":"ephemeral","ttl":"5m"}}`.
-    **Do not** run the executor↔advisor downgrade guard for tito (the pair Sonnet-5-5→Opus-5-5 is valid; vet tu:437).
+    **Do not** run the executor↔advisor downgrade guard for tito (pair Sonnet-5-5→Opus-5-5 is valid).
   - `enable_tool_search=False` → no `defer_loading`, no `tool_search_tool_*` (tools.py:408-465).
   - web_search `max_uses = 10`, `user_location = {"city":"Fresno"}` (only non-empty fields).
-  - no `ENABLE_DYNAMIC_FILTERING` → `web_search_20250305` (per vet M1; NOT `_20260209`).
+  - no `ENABLE_DYNAMIC_FILTERING` → `web_search_20250305` (vet M1; NOT `_20260209`).
 - Beta header `advisor-tool-2026-03-01` still added (payload.py:465) when advisor enabled.
 
-### 2.3 Cache TTL (cache_control.py)
-- `_cache_control_marker` (cache_control.py:13-41): when tito, return `{"type":"ephemeral","ttl":"1h"}`
-  for **both** scopes (tools_system and messages). This overrides `CACHE_TTL`/`CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT`.
+### 2.3 Cache TTL + breakpoints (cache_control.py) — P6
+- For tito, every cache marker is `{"type":"ephemeral","ttl":"1h"}` (tools_system **and** messages).
+- **No separate tools breakpoint** (vet M4): skip `_apply_cache_control` step 2 (tools) for tito.
+- **Two system breakpoints**: system arrives as 2 text blocks (block1 = raw prompt, block2 = memory
+  snapshot, produced by OWUI PATCH A) → place `cache_control` after block1 **and** after block2.
+- **Last-message breakpoint** at 1h; never on a `mid_conversation` message (see §4).
+- Max 4 `cache_control` markers total on any tito request (Anthropic hard limit); tito uses ≤3.
 - `CACHE_CONTROL` for tito is forced to `"cache tools array, system prompt and messages"`
-  (already the default at pipe_template.py:1062 — keep it, just don't let a valve downgrade tito).
+  (already the default, pipe_template.py:1062 — just don't let a valve downgrade tito).
 
 ### 2.4 OWUI tool-manifest strip (pipe_orchestrator.py)
-- pipe_orchestrator.py:215-222 currently strips the manifest only when `deferred_tools` present AND
-  native tool search. For tito, strip `OWUI_TOOL_MANIFEST_RE` from every `role:"system"` string message
+- pipe_orchestrator.py:215-222 strips the manifest only when `deferred_tools` present AND native
+  tool search. For tito, strip `OWUI_TOOL_MANIFEST_RE` from every `role:"system"` string message
   unconditionally.
 
-### 2.5 Per-turn fingerprint + change alert (NEW)
-- After the payload is built (and after `_apply_cache_control`), for tito log exactly one line:
+### 2.5 Per-turn fingerprint + change alert (P4)
+- After the payload is built (post `_apply_cache_control`), for tito log exactly one line:
   `[TITO] sha256_tools=<hex> sha256_system=<hex> model=<base> thinking=<type> effort=<effort> betas=<csv>`.
   `sha256_tools`/`sha256_system` over the *canonicalized, wire-order* serialization (mirror
   `_canonicalize_block`), empty→empty-string hash.
-- Keep a per-`chat_id` record of the previous tuple. If the tuple changes within the same `chat_id`,
-  log at `WARNING` (prefix drift) — else `INFO`. Reuse the existing `self._cache_diff_state` keying
-  pattern or a dedicated `self._tito_fingerprint_state: dict[str, tuple]`.
+- Keep a per-`chat_id` record of the previous tuple. If `sha256_tools` **or** `sha256_system` changed
+  within the same `chat_id`, log `WARNING` **and** send a Discord alert (env `TITO_DISCORD_WEBHOOK`) —
+  not just a log line.
 
 ## 3. PATCH D — mid-conversation system messages (vet H1/H3 + PLAN "PATCH D")
 
 Current: `_convert_messages_to_claude_format` (messages.py:81-106) folds **every** `role:"system"`
 message into the top-level `system` array. Change (tito only):
 
-- A `role:"system"` message with `meta.mid_conversation` truthy is **not** folded into `system`;
-  instead it is appended to `processed_messages` as `{"role":"system","content":[<text blocks>],
+- A message with top-level `mid_conversation: true` (D2) is **not** folded into `system`; it is
+  appended to `processed_messages` as `{"role":"system","content":[<text blocks>],
   "clear_at":"next_user_message"}` at its replay position (after the user message that produced it).
 - Orphan status: a mid-conversation system message is **dropped** when the *next* replayed message
   is not an assistant turn and it is not the last message (vet H1: replaying `user, system, user, ...`
-  is a permanent 400). Implemented as a post-pass over `processed_messages`.
-- Beta header `mid-conversation-system-clear-at-2026-08-21` is added (payload.py beta assembly) when
-  any mid-conversation system message is present. (Live-verified on sonnet-5-5 + haiku-5-5 per BUILD LOG.)
+  is a permanent 400). Post-pass over `processed_messages`.
+- Beta header `mid-conversation-system-clear-at-2026-08-21` added (payload.py beta assembly) when any
+  mid-conversation system message is present. (Live-verified on sonnet-5-5 + haiku-5-5 per BUILD LOG.)
 - Never put `cache_control` on a mid-conversation system message (see §4).
-- Non-tito behavior unchanged: all `role:"system"` messages still fold into `system`.
+- Non-tito behavior unchanged.
 
-## 4. PATCH D cache breakpoint (vet H3)
+## 4. PATCH D cache breakpoint (vet H3 + P6)
 
 - `_apply_cache_control` step 4 / `_cache_last_stable_message` (cache_control.py:663-695): when the
   newest message is a `role:"system"` mid-conversation message, skip it and place the messages
-  breakpoint on the preceding non-system cacheable block (the user message). Same rule in the tool-loop
-  branch. `_place_cache_on_last_cacheable_block` already skips thinking/redacted; extend the callers to
-  also skip `role:"system"` messages.
+  breakpoint on the preceding non-system cacheable block (the user message). Same in the tool-loop
+  branch. `_place_cache_on_last_cacheable_block` already skips thinking/redacted; extend the callers
+  to also skip `role:"system"` messages.
 
-## 5. B4 — frozen tools array + missing-tool handling
+## 5. B4 — frozen tools array + missing-tool handling (C3)
 
-- **Deploy-time dump:** a helper writes the final, canonical `tools` array to a JSON file whose path is
-  env `TITO_TOOLS_FILE`. (Dump helper = small standalone script in `helpers/`, run at deploy, committed
-  or produced in the Space image; the pipe only ever *reads* it.)
+- **File format (C3):** `TITO_TOOLS_FILE` is a JSON **list** in Anthropic tools format —
+  `[{"name","description","input_schema"}, …]` — exactly as sent to the API. Must include the file
+  tools (`view_file`, `query_chat_files`, …), memory tools (`add_memory`, `search_memories`, …),
+  calendar tools and the TinyFish tools. Written by a deploy-time dump helper (see §8).
 - **Request-time (tito):** `_convert_tools_to_claude_format` returns the frozen array loaded from
   `TITO_TOOLS_FILE` (byte-stable across outages and upstream description edits) instead of live
-  `__tools__`/`body.tools`. Tools stay byte-identical; order fixed.
-- **Missing MCP tool at call time:** when a tool_use names a tool not present among the live callables,
-  return a `tool_result` with `is_error: True` and Vietnamese text in the "lịch tạm thời không dùng được"
-  family (exact string pinned as a constant, see KEY.md), and fire a Discord alert
-  (env `TITO_DISCORD_WEBHOOK`). **Never** remove the tool from `tools[]` (the prefix must not change).
+  `__tools__`/`body.tools`. Order fixed.
+- **Missing MCP tool at call time:** when a tool_use names a tool absent from the live callables,
+  return a `tool_result` with `is_error: True` and the Vietnamese text constant (KEY.md), and fire a
+  Discord alert (env `TITO_DISCORD_WEBHOOK`). **Never** remove the tool from `tools[]`.
 - Frozen tools are *always* sent even when no live socket/tool-server is reachable (vet B2/B4).
 
-## 6. BUDGET GATE (PLAN "DECISIONS 2026-11-09" + vet H5/H6/H7)
+## 6. BUDGET GATE (PLAN "DECISIONS 2026-11-09" + vet H5/H6/H7 + P2/P3)
 
 - Month = calendar month in `America/Los_Angeles` (Pacific). Month key = `"YYYY-MM"`.
-- Spend source = `cost_usd` persisted by SHOW_COST → `total_usage["cost_usd"]`
+- **Spend source (P2):** `cost_usd` persisted by SHOW_COST → `total_usage["cost_usd"]`
   (pipe_orchestrator.py:1266) → `_public_usage` (runtime.py:131, keeps non-underscore keys) →
   `Chats.upsert_message_to_chat_by_id_and_message_id(... {"usage": ...})` (pipe_orchestrator.py:1483).
-  `cost_usd` survives into `message.usage.cost_usd` in the DB.
-- **Prerequisite fix (vet H6.1):** for tito, force `include_usage = True` (pipe_orchestrator.py:243-246)
-  so `cost_usd` is always computed and persisted, while token display stays off (`SHOW_TOKEN_COUNT` not
-  shown to Dad). Without this the gate reads $0 forever.
+  `cost_usd` lands in `message.usage.cost_usd`.
+- **Helper (P2):** `month_spend_usd(now) -> float` = SUM of `usage.cost_usd` across **all users'
+  chats** in the OWUI DB whose message timestamp falls in the Pacific month containing `now`.
+  Exact ORM/query against `open_webui.models.chats` is **VERIFY-AT-RUNTIME** (OWUI not in this repo);
+  the store point is the `upsert_message_to_chat_by_id_and_message_id` call above. Cache the sum for
+  **60s**. **Fail-OPEN**: on any DB error return `0.0` **and** send a Discord alert (never block Dad).
+- **Prerequisite fix (vet H6.1):** for tito force `include_usage = True` (pipe_orchestrator.py:243-246)
+  so `cost_usd` is always computed/persisted, while token display stays off.
 - Pure decision function (testable, no DB):
   `_tito_budget_decision(month_spend_usd: float) -> tuple[str, str|None]`:
-  - `month_spend_usd >= TITO_HARD_CAP_USD` (25) → `("hard", HARD_CAP_TEXT)`.
-  - `TITO_SOFT_CAP_USD` (15) `<= month_spend_usd < 25` → `("soft", None)` (fires one Discord warning per month).
+  - `month_spend_usd >= TITO_HARD_CAP_USD` (**default 22**, P3) → `("hard", HARD_CAP_TEXT)`.
+  - `TITO_SOFT_CAP_USD` (**15**) `<= month_spend_usd < hard` → `("soft", None)` (one Discord warning/month).
   - else → `("ok", None)`.
+  Caps read from env (`TITO_HARD_CAP_USD`/`TITO_SOFT_CAP_USD`) with the defaults above.
 - `HARD_CAP_TEXT` (exact): `"Tito đang nghỉ tới ngày 1 tháng sau. Dori đã biết rồi, ông không cần làm gì."`
 - In `pipe()`, **before** any client build or API call (right after the task-model branch and auth),
-  for tito: read `month_spend_usd` (DB read, cached a few minutes — vet M11), call
-  `_tito_budget_decision`. On `"hard"`: emit the text as a normal assistant message and return —
-  **no Anthropic API call**. On `"soft"`: if no warning sent for this month key, send one Discord alert.
-- Soft-warning dedupe key = month key; state dict `self._tito_soft_warned: set[str]` (in-memory; a Space
-  restart may re-warn once — accepted).
+  for tito: `spend = month_spend_usd(now)`; `_tito_budget_decision(spend)`. On `"hard"`: emit
+  `HARD_CAP_TEXT` as a normal assistant message and return — **no Anthropic API call**. On `"soft"`:
+  if no warning sent for this month key, one Discord alert. Soft dedupe key = month key;
+  `self._tito_soft_warned: set[str]` (in-memory; a Space restart may re-warn once — accepted).
 
-## 7. Error mapping (vet H7) — in scope for budget gate only
+## 7. P5 — minimal error mapping for tito (vet H7, now in scope)
 
-The four patches do **not** include the full "map every pipe error to Vietnamese + Discord" change
-(vet H7). Only the budget-gate hard-cap text and the B4 missing-tool text are in scope here.
-H7 is listed in FLASH-BRIEF as a follow-up, not implemented now.
+- For tito, any Anthropic API error (rate-limit, overload, billing/hard-cap, 400/401/500, connection)
+  that would otherwise surface raw English/German text → emit a fixed Vietnamese assistant line
+  `TITO_ERROR_TEXT` (exact, KEY.md) **and** send the raw error to Discord (`TITO_DISCORD_WEBHOOK`).
+  Never show the raw error to the user. Implemented as a tito branch in `handle_errors` /
+  `_handle_stream_exception` (runtime.py) and the truncated-stream retry notices
+  (pipe_orchestrator.py:1086-1116). Non-tito error handling unchanged.
 
 ## 8. Build / regeneration
 
 - Add `SRC_DIR / "tito.py"` to `METHOD_GROUP_SOURCES` in `helpers/build_anthropic_pipe.py`.
+- Deploy dump helper `helpers/dump_tito_tools.py` writes `TITO_TOOLS_FILE` (C3 format) from the live
+  tool set; run at deploy, committed or produced in the Space image.
 - `python helpers/build_anthropic_pipe.py` (writes `anthropic_pipe.py` + `anthropic_pipe.min.py`).
 - Bump `version:` + changelog in `src/anthropic_pipe/pipe_template.py`; mirror to `README.md`.
 - Commit `src/` **and** both regenerated artifacts (AGENTS.md release checklist).
@@ -192,7 +202,7 @@ Legend: ✓ exact/near-exact · ≈ drifted a few lines (real loc shown) · EXT 
 
 | Doc cite | Claim | Real location | Verdict |
 |---|---|---|---|
-| vet B1 `pipe_template.py:1186-1330` | UserValves block | 1180-1361 | ≈ (block 1180-1361) |
+| vet B1 `pipe_template.py:1186-1330` | UserValves block | 1180-1361 | ≈ |
 | vet B1 `ENABLE_THINKING default False` | — | 1186-1189 | ✓ |
 | vet B1 `EFFORT default high` | — | 1200-1203 | ✓ |
 | vet B1 `ENABLE_ADVISOR_TOOL default False` | — | 1314-1317 | ✓ |
@@ -216,13 +226,13 @@ Legend: ✓ exact/near-exact · ≈ drifted a few lines (real loc shown) · EXT 
 | vet H6 `pipe_orchestrator.py:243-246 include_usage` | — | 243-246 | ✓ |
 | vet H6 `pipe_orchestrator.py:1264-1267 cost` | — | 1263-1267 | ≈ |
 | vet H6 `pricing.py:43 sonnet-5-5 cache_read 0.10` | — | 43 | ✓ |
-| audit `cache_control on last system block` | — | cache_control.py:508-516 | ✓ |
 | vet M1 `tools.py:196-208 web_search version` | — | 196-212 | ≈ |
 | vet M1 `tools.py:175-190 user_location` | — | 175-227 | ≈ |
 | vet H5 `pipe_orchestrator.py:332-335 hash diff` | — | 332-335 | ✓ |
 | vet H7 `pipe_orchestrator.py:1087-1115` / `1177-1181` | retry/error text | 1086-1116 / 1166-1182 | ≈ |
 | vet `payload.py:32-34 max_tokens` | — | 32-34 | ✓ |
 | vet `payload.py:546-570 cache diag` | — | 540-563 | ≈ |
+| orc C2 `functions.py:265-266` / `main.py:1343` | tito gate / body rewrite | — | EXT (VERIFY-AT-RUNTIME) |
 
-Only material mismatches are line drift (a few lines) and OWUI-repo cites; no cited file:line is
-*factually* wrong about behavior. All specs above use the real locations.
+No cited file:line is *factually* wrong about behavior; only line drift and OWUI-repo cites. Real
+locations used throughout.

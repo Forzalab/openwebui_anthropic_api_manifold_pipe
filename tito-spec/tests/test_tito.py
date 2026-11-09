@@ -2,8 +2,8 @@
 
 These tests are the SPEC's executable contract. They FAIL today (red) and pass
 only once `src/anthropic_pipe/tito.py` exists and payload/tools/messages/
-cache_control/orchestrator are wired per SPEC. Behavioural checks drive the real
-functions with a `"tito"` model id; pure-function checks drive `tito.py`.
+cache_control/runtime/orchestrator are wired per SPEC. Behavioural checks drive
+the real functions; pure-function checks drive `tito.py`.
 
 Runs without OpenWebUI and without the `anthropic` SDK (matches the repo's other
 helpers/test_*.py). Usage:
@@ -15,8 +15,10 @@ Exit 0 = all checks pass (green). Exit 1 = red.
 from __future__ import annotations
 
 import asyncio
+import contextvars as _cv
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -26,21 +28,24 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "anthropic_pipe"
 
 # Expected values, each sourced from tito-spec/SPEC.md (not "because the spec says"):
-#   effort "medium" / thinking adaptive / model claude-sonnet-5-5   -> SPEC §2.1
-#   advisor model opus-5-5, max_uses 3, caching 5m                  -> SPEC §2.2
-#   mid-conversation beta header                                    -> SPEC §3
-#   hard/soft caps 25/15 + HARD_CAP_TEXT                            -> SPEC §6
+#   effort "medium" / thinking adaptive                          -> SPEC §2.1
+#   advisor model opus-5-5, max_uses 3, caching 5m               -> SPEC §2.2
+#   cache ttl 1h / no tools bp / 2 system bp                     -> SPEC §2.3 (P6)
+#   mid-conversation top-level key + beta header                 -> SPEC §3 (C1/D2)
+#   hard cap 22 / soft 15 + HARD_CAP_TEXT / TITO_ERROR_TEXT      -> SPEC §6/§7 (P3/P5)
 TITO_EXPECT = {
-    "base_model": "claude-sonnet-5-5",
+    "base_model": "claude-sonnet-5-5",          # body model (no remap; C2)
     "effort": "medium",
     "thinking": {"type": "adaptive"},
     "advisor_model": "claude-opus-5-5",
     "advisor_max_uses": 3,
     "advisor_caching": {"type": "ephemeral", "ttl": "5m"},
     "beta": "mid-conversation-system-clear-at-2026-08-21",
-    "hard_cap": 25.0,
+    "hard_cap": 22.0,
     "soft_cap": 15.0,
+    "cache_ttl": "1h",
     "hard_cap_text": "Tito đang nghỉ tới ngày 1 tháng sau. Dori đã biết rồi, ông không cần làm gì.",
+    "error_text": "Tito đang bận một chút, ông thử lại sau vài phút nhé.",
 }
 
 CHECKS = []  # (name, ok, detail)
@@ -79,33 +84,38 @@ else:
         record("TITO_CONFIG defined", cfg is not None)
         if cfg:
             record("effort == medium", cfg.get("effort") == "medium", repr(cfg.get("effort")))
-            record("base_model == claude-sonnet-5-5", cfg.get("base_model") == "claude-sonnet-5-5")
+            record("thinking adaptive", cfg.get("thinking") == {"type": "adaptive"})
             record("advisor model", cfg.get("advisor", {}).get("model") == "claude-opus-5-5")
             record("advisor max_uses 3", cfg.get("advisor", {}).get("max_uses") == 3)
             record("advisor caching 5m", cfg.get("advisor", {}).get("caching") == "5m")
+            record("enable_tool_search off", cfg.get("enable_tool_search") is False)
             record("web_search_max_uses 10", cfg.get("web_search_max_uses") == 10)
             record("user_location Fresno", cfg.get("user_location") == {"city": "Fresno"})
-            record("cache TTL 1h both", cfg.get("cache") == {"tools_system_ttl": "1h", "messages_ttl": "1h"})
+            record("hide_blocks", cfg.get("hide_blocks") == ["advisor", "web_search", "web_fetch"])
+            record("cache P6", cfg.get("cache") == {"ttl": "1h", "tools_breakpoint": False, "system_breakpoints": 2},
+                   repr(cfg.get("cache")))
+            record("show_cost on", cfg.get("show_cost") is True)
 
         _is_tito = getattr(Tito, "_is_tito", None)
         if _is_tito:
-            record("_is_tito('tito')", _is_tito("tito") is True)
-            record("_is_tito('claude-sonnet-5-5')", _is_tito("claude-sonnet-5-5") is False)
-            record("_is_tito('anthropic/tito')", _is_tito("anthropic/tito") is True)
+            record("_is_tito metadata id tito", _is_tito({"model": {"id": "tito"}}) is True)
+            record("_is_tito metadata id base", _is_tito({"model": {"id": "claude-sonnet-5-5"}}) is False)
+            record("_is_tito None", _is_tito(None) is False)
 
         _is_mid = getattr(Tito, "_is_mid_conversation_system", None)
         if _is_mid:
-            record("mid_conversation marker True", _is_mid({"role": "system", "meta": {"mid_conversation": True}}))
-            record("mid_conversation marker absent", not _is_mid({"role": "system", "content": "x"}))
+            record("mid_conversation top-level True",
+                   _is_mid({"role": "system", "content": "x", "mid_conversation": True}))
+            record("mid_conversation key absent", not _is_mid({"role": "system", "content": "x"}))
 
         _decide = getattr(Tito, "_tito_budget_decision", None)
         if _decide:
-            h, htxt = _decide(25.0)
-            record("budget >=25 -> hard", h == "hard" and htxt == TITO_EXPECT["hard_cap_text"], f"{h!r} {htxt!r}")
-            record("budget >=25 text exact", htxt == TITO_EXPECT["hard_cap_text"])
-            s, stxt = _decide(15.0)
-            record("budget 15 -> soft", s == "soft" and stxt is None, f"{s!r}")
-            record("budget 14.99 -> ok", _decide(14.99)[0] == "ok")
+            h, htxt = _decide(TITO_EXPECT["hard_cap"])
+            record("budget >= hard -> hard", h == "hard", f"{h!r}")
+            record("hard text exact", htxt == TITO_EXPECT["hard_cap_text"])
+            record("budget just under hard -> soft", _decide(TITO_EXPECT["hard_cap"] - 0.01)[0] == "soft")
+            record("budget == soft -> soft", _decide(TITO_EXPECT["soft_cap"])[0] == "soft")
+            record("budget < soft -> ok", _decide(TITO_EXPECT["soft_cap"] - 0.01)[0] == "ok")
 
         _pmonth = getattr(Tito, "_tito_pacific_month", None)
         if _pmonth:
@@ -120,13 +130,14 @@ else:
 
         _frozen = getattr(Tito, "_tito_frozen_tools", None)
         if _frozen:
+            tmp = None
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-                json.dump([{"name": "x", "description": "x", "input_schema": {"type": "object"}}], fh)
+                json.dump([{"name": "view_file", "description": "d", "input_schema": {"type": "object"}}], fh)
                 tmp = fh.name
-            import os
             os.environ["TITO_TOOLS_FILE"] = tmp
             try:
-                record("frozen tools returns list", isinstance(_frozen(), list))
+                got = _frozen()
+                record("frozen tools returns list", isinstance(got, list), repr(type(got)))
             finally:
                 os.environ.pop("TITO_TOOLS_FILE", None)
                 Path(tmp).unlink(missing_ok=True)
@@ -141,9 +152,13 @@ else:
             record("fingerprint stable", isinstance(f1, str) and f1 == _fp(p1))
             record("fingerprint changes with system", f1 != f2)
 
+        _err = getattr(Tito, "_tito_error_text", None)
+        if _err:
+            record("tito error text exact", _err() == TITO_EXPECT["error_text"])
+
 
 # =============================================================================
-# Behavioural: create_request_payload honours tito (effort/thinking/model)
+# Behavioural: create_request_payload honours tito (effort/thinking, no remap)
 # =============================================================================
 def _load_payload():
     payload = _load_module("_tito_payload", SRC / "request" / "payload.py")
@@ -193,8 +208,11 @@ class FakePipe:
         self.valves = FakeValves()
         self._processed_messages = processed_messages if processed_messages is not None else []
 
+    def _is_tito(self, metadata):
+        return (metadata or {}).get("model", {}).get("id") == "tito"
+
     def get_model_info(self, name):
-        # Sonnet-5-5 capability surface (SPEC D2: base model drives capabilities).
+        # Sonnet-5-5 capability surface (SPEC D1: body model already carries the base).
         return {
             "max_tokens": 128000,
             "supports_effort": True,
@@ -225,17 +243,19 @@ async def _run_payload_checks(payload):
         return
     record("payload module loads", True)
 
-    async def call(pipe, body, metadata=None, user_valves=None):
+    async def call(pipe, body, metadata, user_valves=None):
         user = {"valves": user_valves or FakeUserValves()}
         return await payload.create_request_payload(
-            pipe, body, metadata or {}, user, None, _noop, None
+            pipe, body, metadata, user, None, _noop, None
         )
 
-    # (a) tito: model remap + effort medium + thinking adaptive, ignoring valve/reasoning_effort.
+    TITO_META = {"model": {"id": "tito"}}
+    BASE_BODY = {"model": TITO_EXPECT["base_model"], "messages": [], "reasoning_effort": "high"}
+
+    # (a) tito: effort medium + thinking adaptive, ignoring valve/reasoning_effort. No remap.
     p = FakePipe()
-    body = {"model": "anthropic/tito", "messages": [], "reasoning_effort": "high"}
-    out, _h, _m, _t = await call(p, body)
-    record("tito remaps model -> claude-sonnet-5-5", out.get("model") == TITO_EXPECT["base_model"],
+    out, _h, _m, _t = await call(p, BASE_BODY, TITO_META)
+    record("no model remap (body stays base)", out.get("model") == TITO_EXPECT["base_model"],
            f"model={out.get('model')!r}")
     record("tito effort medium (ignores reasoning_effort/valve)", out.get("output_config") == {"effort": "medium"},
            f"output_config={out.get('output_config')!r}")
@@ -244,9 +264,9 @@ async def _run_payload_checks(payload):
 
     # (b) mid-conversation system present -> beta header added.
     mid = {"role": "system", "content": [{"type": "text", "text": "status"}],
-           "clear_at": "next_user_message", "meta": {"mid_conversation": True}}
+           "clear_at": "next_user_message", "mid_conversation": True}
     p2 = FakePipe(processed_messages=[mid])
-    out2, h2, _m2, _t2 = await call(p2, {"model": "anthropic/tito", "messages": []})
+    out2, h2, _m2, _t2 = await call(p2, BASE_BODY, TITO_META)
     betas = (h2.get("anthropic-beta", "") or "").split(",")
     record("mid-conversation beta header added", TITO_EXPECT["beta"] in betas, f"betas={betas!r}")
 
@@ -292,18 +312,16 @@ def _run_tools_checks():
         def get_model_info(self, name):
             return {}
 
-        def _is_tito(self, name):
-            return name == "tito"
+        def _is_tito(self, metadata):
+            return (metadata or {}).get("model", {}).get("id") == "tito"
 
         def _tito_config(self):
-            return {
-                "advisor": {"enabled": True, "model": "claude-opus-5-5", "max_uses": 3, "caching": "5m"},
-                "enable_tool_search": False,
-            }
+            return {"advisor": {"enabled": True, "model": "claude-opus-5-5", "max_uses": 3, "caching": "5m"},
+                    "enable_tool_search": False}
 
     got, _ = Pipe()._convert_tools_to_claude_format(
-        __tools__={}, body={}, actual_model_name="tito",
-        __user__={"valves": TUV()}, __metadata__={},
+        __tools__={}, body={}, actual_model_name=TITO_EXPECT["base_model"],
+        __user__={"valves": TUV()}, __metadata__={"model": {"id": "tito"}},
     )
     advisor = next((t for t in got if t.get("name") == "advisor"), None)
     record("advisor present for tito (valve off)", advisor is not None)
@@ -314,7 +332,7 @@ def _run_tools_checks():
 
 
 # =============================================================================
-# Behavioural: messages cache breakpoint skips role:system
+# Behavioural: cache breakpoints (P6 layout + skip role:system + 1h ttl)
 # =============================================================================
 def _run_cache_checks():
     cc = _load_module("_tito_cache", SRC / "request" / "cache_control.py")
@@ -322,21 +340,44 @@ def _run_cache_checks():
         record("cache_control module loads", False, "missing")
         return
     record("cache_control module loads", True)
-    # Inject names the module resolves from class Pipe / template scope at call time.
     cc.Pipe = type("Pipe", (), {"_dump_sdk_obj": staticmethod(lambda o: o),
                                 "_first_volatile_block_index": staticmethod(lambda m: None)})
     cc.MEMORY_CONTEXT_APPENDIX_HEADER = "\n\n---\nMEMORY"
 
     class CV:
-        CACHE_TTL = "1 hour"
+        CACHE_TTL = "5 minutes"                # default; tito must override to 1h
         CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT = "same as CACHE_TTL"
         CACHE_CONTROL = "cache tools array, system prompt and messages"
+        ENABLE_PROGRAMMATIC_TOOL_CALLING = False
 
     class Pipe(cc.PipeCacheControlMethods):
         valves = CV()
+        TITO_ACTIVE = _cv.ContextVar("test_tito_active", default=False)
 
+    # P6: full _apply_cache_control for tito.
+    payload = {
+        "tools": [{"name": "web_search", "type": "web_search_20250305"}],
+        "system": [{"type": "text", "text": "block1"}, {"type": "text", "text": "block2"}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }
+    p = Pipe()
+    p.TITO_ACTIVE.set(True)
+    p._apply_cache_control(payload, is_tool_loop=False, iteration=1)
+
+    tools_cc = any("cache_control" in t for t in payload.get("tools", []))
+    sys_cc = [("cache_control" in b) for b in payload["system"]]
+    msg_cc = any("cache_control" in b for b in payload["messages"][-1]["content"])
+    record("P6 no tools breakpoint for tito", not tools_cc)
+    record("P6 both system blocks cached", sys_cc == [True, True], repr(sys_cc))
+    record("P6 system breakpoint 1h ttl",
+           payload["system"][0].get("cache_control") == {"type": "ephemeral", "ttl": TITO_EXPECT["cache_ttl"]},
+           repr(payload["system"][0].get("cache_control")))
+    record("P6 last-message breakpoint present", msg_cc)
+
+    # PATCH D/H3: messages breakpoint must skip a mid_conversation system message.
     user_msg = {"role": "user", "content": [{"type": "text", "text": "hi"}]}
-    status_msg = {"role": "system", "content": [{"type": "text", "text": "status"}], "clear_at": "next_user_message"}
+    status_msg = {"role": "system", "content": [{"type": "text", "text": "status"}],
+                  "clear_at": "next_user_message", "mid_conversation": True}
     msgs = [dict(user_msg), dict(status_msg)]
     Pipe()._cache_last_stable_message(msgs)
 
