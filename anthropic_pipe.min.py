@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.2
+version: 0.11.0
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.0
+- Tito model (OWUI model id `tito`): fixed config (effort medium, adaptive thinking, Opus-5-5 advisor, web_search Fresno/10 uses, tool search off), a frozen tools array loaded from `TITO_TOOLS_FILE`, a Pacific-month budget gate (`TITO_HARD_CAP_USD` 22 / `TITO_SOFT_CAP_USD` 15, fail-open) and Vietnamese-only error mapping. Gated entirely on `__metadata__["model"]["id"] == "tito"`; every other model is byte-for-byte unchanged.
+
 v0.10.2
 - Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
 - Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
@@ -588,6 +591,13 @@ async def create_request_payload(
 
     status = StatusEmitter(__event_emitter__)
 
+    _is_tito_fn = getattr(pipe, "_is_tito", None)
+    is_tito = bool(_is_tito_fn is not None and _is_tito_fn(__metadata__))
+    _tito_cfg = {}
+    if is_tito:
+        _tito_cfg_fn = getattr(pipe, "_tito_config", None)
+        _tito_cfg = _tito_cfg_fn() if callable(_tito_cfg_fn) else (_tito_cfg_fn or {})
+
     actual_model_name = body["model"].split("/")[-1]
     model_info = pipe.get_model_info(actual_model_name)
     max_tokens_limit = model_info["max_tokens"]
@@ -623,7 +633,10 @@ async def create_request_payload(
             return value
 
         body_effort = body.get("reasoning_effort")
-        if body_effort in ("low", "medium", "high", "xhigh", "max"):
+        if is_tito:
+
+            effective_effort = str(_tito_cfg.get("effort") or "medium")
+        elif body_effort in ("low", "medium", "high", "xhigh", "max"):
             effective_effort = _clamp_effort(body_effort)
         else:
             effective_effort = _clamp_effort(__user__["valves"].EFFORT)
@@ -631,8 +644,13 @@ async def create_request_payload(
         effort_config = {"effort": effective_effort}
         logger.debug(f"Effort level set to: {effective_effort}")
 
-    enable_thinking = __user__["valves"].ENABLE_THINKING or __metadata__.get(
-        "anthropic_thinking", False
+    enable_thinking = (
+        True
+        if is_tito
+        else (
+            __user__["valves"].ENABLE_THINKING
+            or __metadata__.get("anthropic_thinking", False)
+        )
     )
     if not enable_thinking and model_info.get("thinking_always_on"):
 
@@ -646,7 +664,10 @@ async def create_request_payload(
         enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
 
-        if model_info["supports_adaptive_thinking"]:
+        if is_tito:
+            thinking_config = dict(_tito_cfg.get("thinking") or {"type": "adaptive"})
+
+        elif model_info["supports_adaptive_thinking"]:
             thinking_config = {"type": "adaptive"}
         else:
             user_budget = __user__["valves"].THINKING_BUDGET_TOKENS
@@ -674,7 +695,7 @@ async def create_request_payload(
             )
 
         thinking_display = __user__["valves"].THINKING_DISPLAY
-        if thinking_display in ("omitted", "summarized", "updates"):
+        if not is_tito and thinking_display in ("omitted", "summarized", "updates"):
             thinking_config["display"] = thinking_display
 
         payload["thinking"] = thinking_config
@@ -942,8 +963,20 @@ async def create_request_payload(
         payload["container"] = previous_container_id
         logger.info(f"📦 Reusing container from previous turn: {previous_container_id}")
 
-    if __user__["valves"].ENABLE_ADVISOR_TOOL:
+    if is_tito or __user__["valves"].ENABLE_ADVISOR_TOOL:
         beta_headers.append("advisor-tool-2026-03-01")
+
+    if is_tito and any(
+        isinstance(_m, dict)
+        and _m.get("role") == "system"
+        and (
+            _m.get("clear_at") == "next_user_message"
+            or _m.get("mid_conversation") is True
+        )
+        for _m in processed_messages
+    ):
+        if "mid-conversation-system-clear-at-2026-08-21" not in beta_headers:
+            beta_headers.append("mid-conversation-system-clear-at-2026-08-21")
 
     owui_compacted = any(
         isinstance(_b, dict) and "[CONVERSATION SUMMARY]" in str(_b.get("text", ""))
@@ -1146,7 +1179,7 @@ async def create_request_payload(
         _t["name"] for _t in tools_list
         if isinstance(_t, dict) and _t.get("defer_loading") and _t.get("name")
     )
-    if _deferred_names:
+    if _deferred_names and not is_tito:
         _tool_search_nudge = {
             "type": "text",
             "text": (
@@ -1166,7 +1199,11 @@ async def create_request_payload(
             system_messages = [_tool_search_nudge]
 
     _tool_names = {_t.get("name") for _t in tools_list if isinstance(_t, dict)}
-    if (__metadata__ or {}).get("terminal_id") and "code_execution" in _tool_names:
+    if (
+        (__metadata__ or {}).get("terminal_id")
+        and "code_execution" in _tool_names
+        and not is_tito
+    ):
         _terminal_hint = {
             "type": "text",
             "text": (
@@ -3363,6 +3400,10 @@ class Pipe:
         self._cache_diagnostics_state: Dict[str, str] = {}
 
     def _cache_control_marker(self, scope: str = "messages") -> dict:
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is not None and _tito_cv.get():
+            return {"type": "ephemeral", "ttl": "1h"}
+
         setting = self.valves.CACHE_TTL
         if scope == "tools_system":
             override = getattr(self.valves, "CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT", "same as CACHE_TTL")
@@ -3683,6 +3724,11 @@ class Pipe:
         self, payload: dict, is_tool_loop: bool = False, iteration: int = 1
     ) -> None:
         cache_level = self.valves.CACHE_CONTROL
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
+        if tito_active:
+
+            cache_level = "cache tools array, system prompt and messages"
         if cache_level == "cache disabled":
             return
 
@@ -3700,7 +3746,7 @@ class Pipe:
         cache_marker = self._cache_control_marker("tools_system")
 
         tools = payload.get("tools", [])
-        if tools:
+        if tools and not tito_active:
 
             placed = False
             for i in range(len(tools) - 1, -1, -1):
@@ -3717,12 +3763,18 @@ class Pipe:
 
         system = payload.get("system", [])
         if system:
+            if tito_active:
 
-            for i in range(len(system) - 1, -1, -1):
-                block = system[i]
-                if block.get("type") == "text" and block.get("text", "").strip():
-                    block["cache_control"] = cache_marker
-                    break
+                for block in system:
+                    if isinstance(block, dict):
+                        block["cache_control"] = self._cache_control_marker("tools_system")
+            else:
+
+                for i in range(len(system) - 1, -1, -1):
+                    block = system[i]
+                    if block.get("type") == "text" and block.get("text", "").strip():
+                        block["cache_control"] = cache_marker
+                        break
 
         if cache_level == "cache tools array and system prompt":
             return
@@ -3829,6 +3881,21 @@ class Pipe:
             return
 
         last = messages[-1]
+        if isinstance(last, dict) and last.get("role") == "system":
+            for msg in reversed(messages[:-1]):
+                if not isinstance(msg, dict) or msg.get("role") == "system":
+                    continue
+                volatile_at = self._first_volatile_block_index(msg)
+                if volatile_at is not None:
+                    if volatile_at > 0:
+                        self._place_cache_on_last_cacheable_block(
+                            msg.get("content", [])[:volatile_at]
+                        )
+                    return
+                self._place_cache_on_last_cacheable_block(msg.get("content", []))
+                return
+            return
+
         volatile_at = self._first_volatile_block_index(last)
 
         if volatile_at is None:
@@ -3850,6 +3917,8 @@ class Pipe:
     def _convert_messages_to_claude_format(
         self, raw_messages
     ) -> tuple[list[dict], list[dict], list[str]]:
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
         processed_messages: list[Dict[str, Any]] = []
         extracted_memories = None
         previous_marker_metadata: list[str] = []
@@ -3907,6 +3976,24 @@ class Pipe:
             if not claude_message:
                 continue
             if role == "system":
+
+                if tito_active and msg.get("mid_conversation") is True:
+                    blocks = [
+                        b
+                        for b in claude_message
+                        if isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and b.get("text", "").strip()
+                    ]
+                    if blocks:
+                        processed_messages.append(
+                            {
+                                "role": "system",
+                                "content": blocks,
+                                "clear_at": "next_user_message",
+                            }
+                        )
+                    continue
                 for block in claude_message:
                     text = block["text"]
 
@@ -3946,6 +4033,25 @@ class Pipe:
                                 "text": f"{MEMORY_CONTEXT_APPENDIX_HEADER}{extracted_memories}",
                             }
                         )
+
+        if tito_active:
+            _filtered: list[dict] = []
+            _n = len(processed_messages)
+            for _idx, _m in enumerate(processed_messages):
+                _is_mid = (
+                    isinstance(_m, dict)
+                    and _m.get("role") == "system"
+                    and (
+                        _m.get("mid_conversation") is True
+                        or _m.get("clear_at") == "next_user_message"
+                    )
+                )
+                if _is_mid and _idx < _n - 1:
+                    _next = processed_messages[_idx + 1]
+                    if not (_next.get("role") == "assistant"):
+                        continue
+                _filtered.append(_m)
+            processed_messages = _filtered
 
         last_compaction_idx = -1
         for idx, msg in enumerate(processed_messages):
@@ -4610,6 +4716,11 @@ class Pipe:
         __user__: Dict[str, Any],
         __metadata__: dict[str, Any],
     ) -> tuple[List[dict], set]:
+
+        _is_tito = getattr(self, "_is_tito", None)
+        if _is_tito is not None and _is_tito(__metadata__):
+            return self._convert_tito_tools(actual_model_name, __user__, __metadata__)
+
         claude_tools = []
         tool_names_seen = set()
         api_tool_names = set()
@@ -4974,6 +5085,66 @@ class Pipe:
             logger.debug(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
 
         return claude_tools, api_tool_names
+
+    def _convert_tito_tools(
+        self,
+        actual_model_name: str,
+        __user__: Dict[str, Any],
+        __metadata__: dict[str, Any],
+    ) -> tuple[List[dict], set]:
+        tito_cfg = self._tito_config()
+        tools: List[dict] = []
+        names_seen: set[str] = set()
+
+        frozen_fn = getattr(self, "_tito_frozen_tools", None)
+        frozen = frozen_fn() if frozen_fn is not None else []
+        for t in frozen:
+            if not isinstance(t, dict):
+                continue
+            name = t.get("name")
+            if name and name not in names_seen:
+                tools.append(t)
+                names_seen.add(name)
+
+        advisor_cfg = tito_cfg.get("advisor") or {}
+        if advisor_cfg.get("enabled", True):
+            advisor: dict = {
+                "type": "advisor_20260301",
+                "name": "advisor",
+                "model": advisor_cfg.get("model") or "claude-opus-5-5",
+            }
+            max_uses = advisor_cfg.get("max_uses")
+            if max_uses:
+                advisor["max_uses"] = max_uses
+            caching = advisor_cfg.get("caching")
+            if caching and caching != "off":
+                advisor["caching"] = {"type": "ephemeral", "ttl": caching}
+            tools.append(advisor)
+            names_seen.add("advisor")
+
+        web_search_enabled = self.valves.WEB_SEARCH or (__metadata__ or {}).get(
+            "web_search_enforced", False
+        )
+        if web_search_enabled and self.get_model_info(actual_model_name).get(
+            "supports_web_search_tool", True
+        ):
+            ws: dict = {"type": "web_search_20250305", "name": "web_search"}
+            ws["max_uses"] = tito_cfg.get("web_search_max_uses", 10)
+            loc_fields = {
+                k: v for k, v in (tito_cfg.get("user_location") or {}).items() if v
+            }
+            if loc_fields:
+                ws["user_location"] = {"type": "approximate", **loc_fields}
+            tools.append(ws)
+            names_seen.add("web_search")
+
+        if self.valves.WEB_FETCH:
+            wf: dict = {"type": "web_fetch_20250910", "name": "web_fetch"}
+            wf["max_uses"] = tito_cfg.get("web_fetch_max_uses", 5)
+            tools.append(wf)
+            names_seen.add("web_fetch")
+
+        return tools, set()
 
     def _native_tool_search_active(self, actual_model_name: str, __user__: Dict[str, Any]) -> bool:
         if not __user__["valves"].ENABLE_TOOL_SEARCH:
@@ -6983,6 +7154,17 @@ class Pipe:
         max_retries = self.valves.MAX_RETRIES
         status = StatusEmitter(request_ctx.emit_event)
 
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
+
+        def _final_suffix(default: str) -> str:
+            if not tito_active:
+                return default
+            self._tito_discord_alert(
+                f"Tito: Anthropic API error ({type(exc).__name__}): {exc}"
+            )
+            return self._tito_error_text()
+
         non_retry_map: dict[type[Exception], str] = {
             RateLimitError: f"\n\n⚠️ Rate limit exceeded - maximum retries ({max_retries}) reached. Please try again later.",
             AuthenticationError: f"\n\nError: API key issues. Reason: {getattr(exc, 'message', str(exc))}",
@@ -6995,7 +7177,7 @@ class Pipe:
         for error_type, suffix in non_retry_map.items():
             if isinstance(exc, error_type):
                 await self.handle_errors(exc, request_ctx.event_emitter)
-                return (False, retry_attempts, suffix)
+                return (False, retry_attempts, _final_suffix(suffix))
 
         retryable_with_status: list[tuple[type[Exception], str, str]] = [
             (OverloadedError, "⏳ API overloaded, retrying...", "🔧 API overloaded"),
@@ -7015,12 +7197,16 @@ class Pipe:
                     return (
                         False,
                         retry_attempts,
-                        f"\n\n{fail_label} after {max_retries} attempts. Please check your connection.",
+                        _final_suffix(
+                            f"\n\n{fail_label} after {max_retries} attempts. Please check your connection."
+                        ),
                     )
                 return (
                     False,
                     retry_attempts,
-                    f"\n\n{fail_label} - maximum retries ({max_retries}) reached. Please try again later.",
+                    _final_suffix(
+                        f"\n\n{fail_label} - maximum retries ({max_retries}) reached. Please try again later."
+                    ),
                 )
 
         if isinstance(exc, APIStatusError):
@@ -7040,19 +7226,23 @@ class Pipe:
                 return (
                     False,
                     retry_attempts,
-                    f"\n\n🔧 API overloaded (streaming) - maximum retries ({max_retries}) reached. Please try again later.",
+                    _final_suffix(
+                        f"\n\n🔧 API overloaded (streaming) - maximum retries ({max_retries}) reached. Please try again later."
+                    ),
                 )
             return (
                 False,
                 retry_attempts,
-                f"\n\nError: Anthropic API error. Reason: {getattr(exc, 'message', str(exc))}",
+                _final_suffix(
+                    f"\n\nError: Anthropic API error. Reason: {getattr(exc, 'message', str(exc))}"
+                ),
             )
 
         await self.handle_errors(exc, request_ctx.event_emitter)
         return (
             False,
             retry_attempts,
-            f"\n\nError: {type(exc).__name__} occurred. Reason: {exc}",
+            _final_suffix(f"\n\nError: {type(exc).__name__} occurred. Reason: {exc}"),
         )
 
     async def _apply_sdk_stop_reason_fallback(
@@ -7165,6 +7355,11 @@ class Pipe:
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
 
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is not None and _tito_cv.get():
+            await self._tito_handle_error(exception, __event_emitter__)
+            return
+
         if isinstance(exception, RateLimitError):
             error_msg = "Rate limit exceeded. Please wait before making more requests."
             user_msg = "⚠️ Rate limit reached. Please try again in a moment."
@@ -7258,6 +7453,30 @@ class Pipe:
                     "description": "❌ Response with Errors",
                     "done": True,
                 },
+            },
+            __event_emitter__,
+        )
+
+    async def _tito_handle_error(
+        self,
+        exception,
+        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ):
+        raw = f"{type(exception).__name__}: {exception}"
+        logger.error("Tito API error (mapped to Vietnamese): %s", raw)
+        self._tito_discord_alert(f"Tito: Anthropic API error: {raw}")
+
+        await self.emit_event(
+            {
+                "type": "notification",
+                "data": {"type": "error", "content": self._tito_error_text()},
+            },
+            __event_emitter__,
+        )
+        await self.emit_event(
+            {
+                "type": "status",
+                "data": {"description": "❌ Response with Errors", "done": True},
             },
             __event_emitter__,
         )
@@ -7391,6 +7610,8 @@ class Pipe:
         request_ctx.user = __user__ or {}
         request_ctx.tools = __tools__
 
+        self.TITO_ACTIVE.set(bool(self._is_tito(__metadata__)))
+
         handler_registry = HandlerRegistry(default_handlers())
 
         is_internal = False
@@ -7425,9 +7646,14 @@ class Pipe:
                 await status.complete("No API Key Set!")
                 return error_msg
 
-            HIDDEN_BLOCKS.set(
-                self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
-            )
+            if self.TITO_ACTIVE.get():
+                HIDDEN_BLOCKS.set(
+                    frozenset(self._tito_config().get("hide_blocks", []))
+                )
+            else:
+                HIDDEN_BLOCKS.set(
+                    self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
+                )
 
             TOOL_APPROVAL.set(
                 (
@@ -7446,6 +7672,28 @@ class Pipe:
 
             if __task__:
                 return await self._run_task_model_request(body, task=__task__)
+
+            if self.TITO_ACTIVE.get():
+                from datetime import timezone as _tz
+
+                _now = datetime.now(_tz.utc)
+                _spend = await self.month_spend_usd(_now)
+                _decision, _hard_text = self._tito_budget_decision(_spend)
+                if _decision == "hard":
+                    logger.warning("Tito hard budget cap reached: spend=%s", _spend)
+                    await emit_message_delta(_hard_text)
+                    return _hard_text
+                if _decision == "soft":
+                    _month_key = self._tito_pacific_month(_now)
+                    _warned = getattr(self, "_tito_soft_warned", None)
+                    if _warned is None:
+                        _warned = set()
+                        self._tito_soft_warned = _warned
+                    if _month_key not in _warned:
+                        _warned.add(_month_key)
+                        self._tito_discord_alert(
+                            f"Tito: soft budget cap reached (${_spend:.2f} USD) for {_month_key}"
+                        )
 
             if inspect.isawaitable(__tools__):
                 __tools__ = await __tools__
@@ -7524,8 +7772,15 @@ class Pipe:
 
             if (
                 __metadata__
-                and __metadata__.get("deferred_tools")
-                and self._native_tool_search_active(body["model"].split("/")[-1], __user__)
+                and (
+                    self.TITO_ACTIVE.get()
+                    or (
+                        __metadata__.get("deferred_tools")
+                        and self._native_tool_search_active(
+                            body["model"].split("/")[-1], __user__
+                        )
+                    )
+                )
             ):
                 for msg in body.get("messages", []):
                     if msg.get("role") == "system" and isinstance(msg.get("content"), str):
@@ -7548,7 +7803,8 @@ class Pipe:
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
-                __user__["valves"].SHOW_TOKEN_COUNT != "Off"
+                self.TITO_ACTIVE.get()
+                or __user__["valves"].SHOW_TOKEN_COUNT != "Off"
                 or body.get("stream_options", {}).get("include_usage", False)
             )
             total_usage: Optional[dict[str, int]] = None
@@ -7606,6 +7862,9 @@ class Pipe:
                         is_tool_loop=(tool_loop_iteration > 1),
                         iteration=tool_loop_iteration,
                     )
+
+                    if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
+                        self._tito_log_fingerprint(payload_for_stream, __metadata__)
 
                     _diff_chat_id = __metadata__.get("chat_id") if __metadata__ else None
                     self._log_message_hash_diff(_diff_chat_id, payload_for_stream)
@@ -7790,9 +8049,36 @@ class Pipe:
                                                 if task_error is not None:
                                                     tool_result = f"Error executing tool '{tool_name}': {task_error}"
 
+                                                tito_missing_tool = False
+                                                if self.TITO_ACTIVE.get():
+                                                    _live = (
+                                                        bool(
+                                                            __tools__
+                                                            and tool_name in __tools__
+                                                            and __tools__[tool_name].get("callable")
+                                                        )
+                                                        or bool(
+                                                            builtin_tools
+                                                            and tool_name in builtin_tools
+                                                            and builtin_tools[tool_name].get("callable")
+                                                        )
+                                                    )
+                                                    if not _live:
+                                                        tito_missing_tool = True
+                                                        tool_result = self._tito_missing_tool_result(
+                                                            tool_use_id, tool_name
+                                                        )["content"]
+                                                        self._tito_discord_alert(
+                                                            f"Tito: missing live tool '{tool_name}'"
+                                                        )
+
                                                 tool_result_embeds = []
                                                 tool_result_files = []
-                                                if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+                                                if (
+                                                    PROCESS_TOOL_RESULT_AVAILABLE
+                                                    and __request__
+                                                    and not tito_missing_tool
+                                                ):
                                                     try:
                                                         tool_result, tool_result_files, tool_result_embeds = (
                                                             await process_tool_result(
@@ -7815,11 +8101,14 @@ class Pipe:
                                                         }
                                                     )
 
-                                                is_error = isinstance(
-                                                    tool_result, str
-                                                ) and (
-                                                    tool_result.startswith("Error:")
-                                                    or tool_result.startswith("Error executing tool")
+                                                is_error = tito_missing_tool or (
+                                                    isinstance(tool_result, str)
+                                                    and (
+                                                        tool_result.startswith("Error:")
+                                                        or tool_result.startswith(
+                                                            "Error executing tool"
+                                                        )
+                                                    )
                                                 )
 
                                                 if isinstance(tool_result, str):
@@ -7977,6 +8266,8 @@ class Pipe:
                                     await self.handle_errors(
                                         stream_error, __event_emitter__
                                     )
+                                    if self.TITO_ACTIVE.get():
+                                        return self._tito_error_text()
                                     return (
                                         final_text()
                                         + f"\n\nAn error occurred: {error_details}"
@@ -8256,10 +8547,16 @@ class Pipe:
                                 f"❌ Truncated stream: max retries ({self.valves.MAX_RETRIES}) exhausted. "
                                 f"Returning error to user."
                             )
-                            await request_ctx.emit_delta(
-                                "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
-                                f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
-                            )
+                            if self.TITO_ACTIVE.get():
+                                self._tito_discord_alert(
+                                    "Tito: truncated stream, max retries exhausted"
+                                )
+                                await request_ctx.emit_delta(self._tito_error_text())
+                            else:
+                                await request_ctx.emit_delta(
+                                    "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
+                                    f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
+                                )
                     break
 
                 except Exception as e:
@@ -8358,11 +8655,15 @@ class Pipe:
             raise
         except Exception as e:
             await self.handle_errors(e, __event_emitter__)
+            if self.TITO_ACTIVE.get():
+                return self._tito_error_text()
             return final_text()
 
         final_status = "✅ Response Complete"
 
-        if include_usage and total_usage and getattr(__user__["valves"], "SHOW_COST", True):
+        if include_usage and total_usage and (
+            self.TITO_ACTIVE.get() or getattr(__user__["valves"], "SHOW_COST", True)
+        ):
             cost_breakdown = self._model_pricing().breakdown(body["model"].split("/")[-1], total_usage)
             if cost_breakdown is not None:
                 total_usage["cost_usd"] = round(sum(cost_breakdown.values()), 6)
@@ -8589,6 +8890,296 @@ class Pipe:
             return completion
 
         return final_text()
+
+    """Everything gated on the OWUI model id ``tito``.
+
+    All state that must survive across turns is kept lazily on the instance
+    (``_tito_spend_cache``, ``_tito_soft_warned``, ``_tito_fingerprint_state``)
+    rather than in ``__init__``, so the mixin does not need to touch the
+    template's constructor.
+    """
+
+    TITO_MODEL_ID = "tito"
+
+    TITO_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+        "anthropic_pipe_tito_active", default=False
+    )
+
+    TITO_CONFIG: dict = {
+        "thinking": {"type": "adaptive"},
+        "effort": "medium",
+        "advisor": {"enabled": True, "model": "claude-opus-5-5", "max_uses": 3, "caching": "5m"},
+        "enable_tool_search": False,
+        "hide_blocks": ["advisor", "web_search", "web_fetch"],
+        "web_search_max_uses": 10,
+        "web_fetch_max_uses": 5,
+        "user_location": {"city": "Fresno"},
+        "cache": {"ttl": "1h", "tools_breakpoint": False, "system_breakpoints": 2},
+        "show_cost": True,
+        "strip_reasoning_effort": True,
+        "skip_tool_search_nudge": True,
+        "skip_terminal_hint": True,
+        "always_strip_tool_manifest": True,
+    }
+
+    HARD_CAP_TEXT = "Tito đang nghỉ tới ngày 1 tháng sau. Dori đã biết rồi, ông không cần làm gì."
+    TITO_ERROR_TEXT = "Tito đang bận một chút, ông thử lại sau vài phút nhé."
+    TITO_MISSING_TOOL_TEXT = "Lịch tạm thời không dùng được, ông thử lại lát nữa nhé."
+
+    @staticmethod
+    def _is_tito(metadata) -> bool:
+        return (metadata or {}).get("model", {}).get("id") == "tito"
+
+    def _tito_config(self) -> dict:
+        return dict(self.TITO_CONFIG)
+
+    @staticmethod
+    def _is_mid_conversation_system(msg) -> bool:
+        if not isinstance(msg, dict):
+            return False
+        return msg.get("mid_conversation") is True or (
+            msg.get("role") == "system" and msg.get("clear_at") == "next_user_message"
+        )
+
+    @staticmethod
+    def _tito_cap(env_name: str, default: float) -> float:
+        raw = (os.environ.get(env_name) or "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _tito_budget_decision(month_spend_usd: float):
+        hard = PipeTitoMethods._tito_cap("TITO_HARD_CAP_USD", 22.0)
+        soft = PipeTitoMethods._tito_cap("TITO_SOFT_CAP_USD", 15.0)
+        if month_spend_usd >= hard:
+            return ("hard", PipeTitoMethods.HARD_CAP_TEXT)
+        if month_spend_usd >= soft:
+            return ("soft", None)
+        return ("ok", None)
+
+    @staticmethod
+    def _tito_pacific_utc_offset(dt) -> int:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        def _nth_sunday(year: int, month: int, n: int):
+            first = _dt(year, month, 1, tzinfo=_tz.utc)
+            days_to_sunday = (6 - first.weekday()) % 7
+            return first + _td(days=days_to_sunday + (n - 1) * 7)
+
+        dst_start = _nth_sunday(dt.year, 3, 2) + _td(hours=10)
+        dst_end = _nth_sunday(dt.year, 11, 1) + _td(hours=9)
+        return -7 if dst_start <= dt < dst_end else -8
+
+    @staticmethod
+    def _tito_pacific_month(dt) -> str:
+        from datetime import timedelta as _td
+
+        offset = PipeTitoMethods._tito_pacific_utc_offset(dt)
+        return (dt + _td(hours=offset)).strftime("%Y-%m")
+
+    @staticmethod
+    def _tito_frozen_tools() -> list:
+        path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
+        if not path:
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [t for t in data if isinstance(t, dict)]
+
+    @staticmethod
+    def _strip_cache_control(node):
+        if isinstance(node, dict):
+            return {
+                k: PipeTitoMethods._strip_cache_control(v)
+                for k, v in node.items()
+                if k != "cache_control"
+            }
+        if isinstance(node, list):
+            return [PipeTitoMethods._strip_cache_control(v) for v in node]
+        return node
+
+    @staticmethod
+    def _tito_fingerprint_shas(payload: dict):
+        def _ser(x):
+            if not x:
+                return ""
+            return json.dumps(
+                x, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str
+            )
+
+        tools = PipeTitoMethods._strip_cache_control(payload.get("tools") or [])
+        system = PipeTitoMethods._strip_cache_control(payload.get("system") or [])
+        tools_sha = hashlib.sha256(_ser(tools).encode("utf-8")).hexdigest()
+        system_sha = hashlib.sha256(_ser(system).encode("utf-8")).hexdigest()
+        return tools_sha, system_sha
+
+    @staticmethod
+    def _tito_fingerprint(payload: dict) -> str:
+        tools_sha, system_sha = PipeTitoMethods._tito_fingerprint_shas(payload)
+        model = payload.get("model", "")
+        thinking = payload.get("thinking") or {}
+        thinking_s = thinking.get("type", "") if isinstance(thinking, dict) else str(thinking)
+        effort = payload.get("effort", "")
+        if not effort:
+            oc = payload.get("output_config")
+            if isinstance(oc, dict):
+                effort = oc.get("effort", "")
+        betas = payload.get("betas") or []
+        betas_csv = ",".join(betas) if isinstance(betas, list) else str(betas)
+        return (
+            f"sha256_tools={tools_sha} sha256_system={system_sha} "
+            f"model={model} thinking={thinking_s} effort={effort} betas={betas_csv}"
+        )
+
+    @staticmethod
+    def _tito_missing_tool_result(tool_use_id: str = "", tool_name: str = "") -> dict:
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": PipeTitoMethods.TITO_MISSING_TOOL_TEXT,
+            "is_error": True,
+        }
+
+    @staticmethod
+    def _tito_error_text() -> str:
+        return PipeTitoMethods.TITO_ERROR_TEXT
+
+    @staticmethod
+    def _tito_discord_alert(message: str) -> None:
+        webhook = (os.environ.get("TITO_DISCORD_WEBHOOK") or "").strip()
+        if not webhook:
+            return
+
+        def _send():
+            try:
+                import json as _json
+                import urllib.request as _ur
+
+                data = _json.dumps({"content": message}).encode("utf-8")
+                req = _ur.Request(
+                    webhook,
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                _ur.urlopen(req, timeout=5)
+            except Exception as e:
+                logger.debug("Tito Discord alert failed: %s", e)
+
+        try:
+            import threading as _th
+
+            _th.Thread(target=_send, daemon=True).start()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _tito_chat_messages(chat) -> list:
+        if isinstance(chat, dict):
+            msgs = chat.get("messages")
+        else:
+            msgs = getattr(chat, "messages", None)
+        return msgs if isinstance(msgs, list) else []
+
+    @staticmethod
+    def _tito_message_month(msg, dt) -> "str | None":
+        if not isinstance(msg, dict):
+            return None
+        ts = msg.get("timestamp") or msg.get("created_at") or msg.get("updated_at")
+        if ts is None:
+            return None
+        from datetime import datetime as _dt, timezone as _tz
+
+        try:
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_tz.utc)
+                return PipeTitoMethods._tito_pacific_month(ts.astimezone(_tz.utc))
+            return PipeTitoMethods._tito_pacific_month(
+                _dt.fromtimestamp(float(ts), tz=_tz.utc)
+            )
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
+    @staticmethod
+    def _tito_usage_cost(msg) -> float:
+        if not isinstance(msg, dict):
+            return 0.0
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            return 0.0
+        try:
+            return float(usage.get("cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def month_spend_usd(self, now=None) -> float:
+        if now is None:
+            from datetime import datetime as _dt, timezone as _tz
+
+            now = _dt.now(_tz.utc)
+
+        cached = getattr(self, "_tito_spend_cache", None)
+        if cached is not None:
+            value, ts = cached
+            if time.time() - ts < 60:
+                return value
+
+        total = 0.0
+        try:
+            chats_cls = globals().get("Chats")
+            if not globals().get("CHATS_AVAILABLE", False) or chats_cls is None:
+                return 0.0
+
+            month_key = self._tito_pacific_month(now)
+            chats = chats_cls.get_chats()
+            if hasattr(chats, "__await__"):
+                chats = await chats
+            for chat in chats or []:
+                for msg in self._tito_chat_messages(chat):
+                    if self._tito_message_month(msg, now) == month_key:
+                        total += self._tito_usage_cost(msg)
+        except Exception as e:
+            total = 0.0
+            logger.warning("Tito month_spend_usd DB error (fail-open): %s", e)
+            self._tito_discord_alert(f"Tito: month_spend_usd DB error (fail-open): {e}")
+
+        setattr(self, "_tito_spend_cache", (total, time.time()))
+        return total
+
+    def _tito_log_fingerprint(self, payload: dict, metadata) -> None:
+        tools_sha, system_sha = self._tito_fingerprint_shas(payload)
+        logger.info("[TITO] %s", self._tito_fingerprint(payload))
+
+        chat_id = (metadata or {}).get("chat_id")
+        if not chat_id:
+            return
+        state = getattr(self, "_tito_fingerprint_state", None)
+        if state is None:
+            state = {}
+            self._tito_fingerprint_state = state
+        prev = state.get(chat_id)
+        if prev is not None and (prev[0] != tools_sha or prev[1] != system_sha):
+            logger.warning(
+                "[TITO] tools/system changed within chat_id=%s "
+                "(tools=%s system=%s)",
+                chat_id,
+                "changed" if prev[0] != tools_sha else "same",
+                "changed" if prev[1] != system_sha else "same",
+            )
+            self._tito_discord_alert(
+                f"Tito: tools/system fingerprint changed for chat_id={chat_id}"
+            )
+        state[chat_id] = (tools_sha, system_sha)
 
     async def _create_payload(
         self,

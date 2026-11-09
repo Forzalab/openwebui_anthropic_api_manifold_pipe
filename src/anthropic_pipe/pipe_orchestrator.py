@@ -93,9 +93,14 @@ class PipeOrchestratorMethods:
 
             # Publish this user's block visibility preference for the formatters,
             # which are too deep in the call chain to be handed a request context.
-            HIDDEN_BLOCKS.set(
-                self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
-            )
+            if self.TITO_ACTIVE.get():
+                HIDDEN_BLOCKS.set(
+                    frozenset(self._tito_config().get("hide_blocks", []))
+                )
+            else:
+                HIDDEN_BLOCKS.set(
+                    self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
+                )
 
             # Human-in-the-loop tool approval (OpenWebUI 0.11.1+). The mode is a
             # per-conversation chat param; automations, channel replies and
@@ -125,6 +130,31 @@ class PipeOrchestratorMethods:
             # STEP 1: Detect if task model (generate title, tags, follow-ups etc.), handle it separately
             if __task__:
                 return await self._run_task_model_request(body, task=__task__)
+
+            # Tito budget gate (SPEC §6): short-circuit before any client build
+            # or API call. Hard cap returns a fixed Vietnamese message; soft cap
+            # sends one Discord warning per Pacific month.
+            if self.TITO_ACTIVE.get():
+                from datetime import timezone as _tz
+
+                _now = datetime.now(_tz.utc)
+                _spend = await self.month_spend_usd(_now)
+                _decision, _hard_text = self._tito_budget_decision(_spend)
+                if _decision == "hard":
+                    logger.warning("Tito hard budget cap reached: spend=%s", _spend)
+                    await emit_message_delta(_hard_text)
+                    return _hard_text
+                if _decision == "soft":
+                    _month_key = self._tito_pacific_month(_now)
+                    _warned = getattr(self, "_tito_soft_warned", None)
+                    if _warned is None:
+                        _warned = set()
+                        self._tito_soft_warned = _warned
+                    if _month_key not in _warned:
+                        _warned.add(_month_key)
+                        self._tito_discord_alert(
+                            f"Tito: soft budget cap reached (${_spend:.2f} USD) for {_month_key}"
+                        )
 
             # STEP 2: Await tools if needed
             if inspect.isawaitable(__tools__):
@@ -217,8 +247,15 @@ class PipeOrchestratorMethods:
             # missing tool. With it off, OWUI's search runs and needs the manifest.
             if (
                 __metadata__
-                and __metadata__.get("deferred_tools")
-                and self._native_tool_search_active(body["model"].split("/")[-1], __user__)
+                and (
+                    self.TITO_ACTIVE.get()
+                    or (
+                        __metadata__.get("deferred_tools")
+                        and self._native_tool_search_active(
+                            body["model"].split("/")[-1], __user__
+                        )
+                    )
+                )
             ):
                 for msg in body.get("messages", []):
                     if msg.get("role") == "system" and isinstance(msg.get("content"), str):
@@ -244,7 +281,8 @@ class PipeOrchestratorMethods:
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
-                __user__["valves"].SHOW_TOKEN_COUNT != "Off"
+                self.TITO_ACTIVE.get()
+                or __user__["valves"].SHOW_TOKEN_COUNT != "Off"
                 or body.get("stream_options", {}).get("include_usage", False)
             )
             total_usage: Optional[dict[str, int]] = None
@@ -332,6 +370,9 @@ class PipeOrchestratorMethods:
                         is_tool_loop=(tool_loop_iteration > 1),
                         iteration=tool_loop_iteration,
                     )
+                    # Tito per-turn fingerprint: one line, warn + Discord on drift.
+                    if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
+                        self._tito_log_fingerprint(payload_for_stream, __metadata__)
                     # Log message-hash diff vs previous request on same chat_id
                     # to pinpoint byte-drift that breaks the prompt cache prefix.
                     _diff_chat_id = __metadata__.get("chat_id") if __metadata__ else None
@@ -558,11 +599,40 @@ class PipeOrchestratorMethods:
                                                 if task_error is not None:
                                                     tool_result = f"Error executing tool '{tool_name}': {task_error}"
 
+                                                # Tito (AC9): a frozen tool whose live callable vanished
+                                                # gets an is_error result + Discord, never a raw English error.
+                                                tito_missing_tool = False
+                                                if self.TITO_ACTIVE.get():
+                                                    _live = (
+                                                        bool(
+                                                            __tools__
+                                                            and tool_name in __tools__
+                                                            and __tools__[tool_name].get("callable")
+                                                        )
+                                                        or bool(
+                                                            builtin_tools
+                                                            and tool_name in builtin_tools
+                                                            and builtin_tools[tool_name].get("callable")
+                                                        )
+                                                    )
+                                                    if not _live:
+                                                        tito_missing_tool = True
+                                                        tool_result = self._tito_missing_tool_result(
+                                                            tool_use_id, tool_name
+                                                        )["content"]
+                                                        self._tito_discord_alert(
+                                                            f"Tito: missing live tool '{tool_name}'"
+                                                        )
+
                                                 # Process tool result through OpenWebUI's handler
                                                 # for Rich UI (HTMLResponse, embeds, files)
                                                 tool_result_embeds = []
                                                 tool_result_files = []
-                                                if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+                                                if (
+                                                    PROCESS_TOOL_RESULT_AVAILABLE
+                                                    and __request__
+                                                    and not tito_missing_tool
+                                                ):
                                                     try:
                                                         tool_result, tool_result_files, tool_result_embeds = (
                                                             await process_tool_result(
@@ -594,11 +664,14 @@ class PipeOrchestratorMethods:
                                                 # completed tool block below.
 
                                                 # Determine if error
-                                                is_error = isinstance(
-                                                    tool_result, str
-                                                ) and (
-                                                    tool_result.startswith("Error:")
-                                                    or tool_result.startswith("Error executing tool")
+                                                is_error = tito_missing_tool or (
+                                                    isinstance(tool_result, str)
+                                                    and (
+                                                        tool_result.startswith("Error:")
+                                                        or tool_result.startswith(
+                                                            "Error executing tool"
+                                                        )
+                                                    )
                                                 )
 
                                                 # Build result block for API
@@ -787,6 +860,8 @@ class PipeOrchestratorMethods:
                                     await self.handle_errors(
                                         stream_error, __event_emitter__
                                     )
+                                    if self.TITO_ACTIVE.get():
+                                        return self._tito_error_text()
                                     return (
                                         final_text()
                                         + f"\n\nAn error occurred: {error_details}"
@@ -1113,10 +1188,16 @@ class PipeOrchestratorMethods:
                                 f"❌ Truncated stream: max retries ({self.valves.MAX_RETRIES}) exhausted. "
                                 f"Returning error to user."
                             )
-                            await request_ctx.emit_delta(
-                                "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
-                                f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
-                            )
+                            if self.TITO_ACTIVE.get():
+                                self._tito_discord_alert(
+                                    "Tito: truncated stream, max retries exhausted"
+                                )
+                                await request_ctx.emit_delta(self._tito_error_text())
+                            else:
+                                await request_ctx.emit_delta(
+                                    "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
+                                    f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
+                                )
                     break
 
                 # ---------------------------------------------------------
@@ -1246,6 +1327,8 @@ class PipeOrchestratorMethods:
             raise
         except Exception as e:
             await self.handle_errors(e, __event_emitter__)
+            if self.TITO_ACTIVE.get():
+                return self._tito_error_text()
             return final_text()
 
         # ---------------------------------------------------------
@@ -1263,7 +1346,9 @@ class PipeOrchestratorMethods:
         # renders every key of `message.usage` in the message info tooltip and
         # persists the dict for the analytics page. Absent (not 0) for models
         # with no known rate card.
-        if include_usage and total_usage and getattr(__user__["valves"], "SHOW_COST", True):
+        if include_usage and total_usage and (
+            self.TITO_ACTIVE.get() or getattr(__user__["valves"], "SHOW_COST", True)
+        ):
             cost_breakdown = self._model_pricing().breakdown(body["model"].split("/")[-1], total_usage)
             if cost_breakdown is not None:
                 total_usage["cost_usd"] = round(sum(cost_breakdown.values()), 6)
