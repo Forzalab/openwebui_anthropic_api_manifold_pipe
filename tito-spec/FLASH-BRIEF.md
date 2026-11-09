@@ -1,6 +1,6 @@
 # FLASH-BRIEF — Tito pipe patches (B, D, B4 freeze, budget gate, P5 error mapping)
 
-Coder brief. Read `tito-spec/SPEC.md` (wins) then `tito-spec/KEY.md`. Build the SPEC, nothing more.
+Coder brief. Read `tito-spec/SPEC.md` (wins). Build the SPEC, nothing more.
 Work only in `/home/user/openwebui_anthropic_api_manifold_pipe`.
 
 ## Allowed files (edit ONLY these)
