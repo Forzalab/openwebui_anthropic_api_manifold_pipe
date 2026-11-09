@@ -217,12 +217,16 @@ class PipeStreamRuntimeSupportMethods:
                     return (
                         False,
                         retry_attempts,
-                        f"\n\n{fail_label} after {max_retries} attempts. Please check your connection.",
+                        _final_suffix(
+                            f"\n\n{fail_label} after {max_retries} attempts. Please check your connection."
+                        ),
                     )
                 return (
                     False,
                     retry_attempts,
-                    f"\n\n{fail_label} - maximum retries ({max_retries}) reached. Please try again later.",
+                    _final_suffix(
+                        f"\n\n{fail_label} - maximum retries ({max_retries}) reached. Please try again later."
+                    ),
                 )
 
         if isinstance(exc, APIStatusError):
@@ -242,19 +246,23 @@ class PipeStreamRuntimeSupportMethods:
                 return (
                     False,
                     retry_attempts,
-                    f"\n\n🔧 API overloaded (streaming) - maximum retries ({max_retries}) reached. Please try again later.",
+                    _final_suffix(
+                        f"\n\n🔧 API overloaded (streaming) - maximum retries ({max_retries}) reached. Please try again later."
+                    ),
                 )
             return (
                 False,
                 retry_attempts,
-                f"\n\nError: Anthropic API error. Reason: {getattr(exc, 'message', str(exc))}",
+                _final_suffix(
+                    f"\n\nError: Anthropic API error. Reason: {getattr(exc, 'message', str(exc))}"
+                ),
             )
 
         await self.handle_errors(exc, request_ctx.event_emitter)
         return (
             False,
             retry_attempts,
-            f"\n\nError: {type(exc).__name__} occurred. Reason: {exc}",
+            _final_suffix(f"\n\nError: {type(exc).__name__} occurred. Reason: {exc}"),
         )
 
     async def _apply_sdk_stop_reason_fallback(

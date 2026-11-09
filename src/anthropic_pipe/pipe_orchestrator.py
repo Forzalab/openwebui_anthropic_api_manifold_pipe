@@ -38,6 +38,9 @@ class PipeOrchestratorMethods:
         request_ctx.metadata = __metadata__ or {}
         request_ctx.user = __user__ or {}
         request_ctx.tools = __tools__
+        # Tito (D4): set once per request so deep methods (messages, cache,
+        # runtime) can read it without threading metadata through the call chain.
+        self.TITO_ACTIVE.set(bool(self._is_tito(__metadata__)))
         # Content-block dispatch. Handlers own one block family each and read
         # everything off request_ctx; families not migrated yet return False and
         # fall through to the inline chain below.
