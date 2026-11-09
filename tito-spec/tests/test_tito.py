@@ -270,6 +270,16 @@ async def _run_payload_checks(payload):
     betas = (h2.get("anthropic-beta", "") or "").split(",")
     record("mid-conversation beta header added", TITO_EXPECT["beta"] in betas, f"betas={betas!r}")
 
+    # (c) N1: one system string with "\n\n"+heading is split into 2 blocks in the payload.
+    _H = _tito.PipeTitoMethods.TITO_SNAPSHOT_HEADING
+    p3 = FakePipe()
+    p3._tito_split_system = _tito.PipeTitoMethods._tito_split_system
+    p3._convert_messages_to_claude_format = lambda raw: (
+        [{"type": "text", "text": "persona\n\n" + _H + "\n- fact"}], [], [])
+    out3, _h3, _m3, _t3 = await call(p3, BASE_BODY, TITO_META)
+    record("N1 payload system split into 2 blocks for tito", len(out3.get("system") or []) == 2,
+           repr(out3.get("system")))
+
 
 async def _noop(event):
     pass
@@ -388,7 +398,144 @@ def _run_cache_checks():
     record("breakpoint ON preceding user msg", has_cc(msgs[0]))
 
 
+# =============================================================================
+# Reviewer fixes B3 / N1 / N2 / N3 / N4
+# =============================================================================
+def _run_review_fix_checks():
+    if _tito is None or getattr(_tito, "PipeTitoMethods", None) is None:
+        record("review-fix checks need tito module", False)
+        return
+    T = _tito.PipeTitoMethods
+
+    # ---- B3: month_spend_usd reads ChatModel.chat["history"]["messages"] ----
+    class ChatModelLike:
+        def __init__(self, chat):
+            self.chat = chat
+
+    def _ts(y, m, d, h=12):
+        return datetime(y, m, d, h, tzinfo=timezone.utc).timestamp()
+
+    now = datetime(2026, 7, 15, 20, 0, tzinfo=timezone.utc)
+    chats = [
+        ChatModelLike({"history": {"messages": {
+            "a": {"timestamp": _ts(2026, 7, 10), "usage": {"cost_usd": 1.5}},
+            "b": {"timestamp": _ts(2026, 7, 11), "usage": {"cost_usd": 2.25}},
+            "old": {"timestamp": _ts(2026, 6, 10), "usage": {"cost_usd": 100.0}},
+            "nousage": {"timestamp": _ts(2026, 7, 12)},
+        }}}),
+        ChatModelLike({"history": {"messages": {
+            "c": {"timestamp": _ts(2026, 7, 12), "usage": {"cost_usd": 0.25}},
+            # 2026-08-01 05:00 UTC = Jul 31 22:00 PDT -> still July
+            "edge": {"timestamp": datetime(2026, 8, 1, 5, tzinfo=timezone.utc).timestamp(),
+                     "usage": {"cost_usd": 1.0}},
+        }}}),
+        ChatModelLike({}),
+    ]
+
+    class FakeChats:
+        calls = 0
+        raise_it = False
+
+        @classmethod
+        async def get_chats(cls, *a, **k):
+            cls.calls += 1
+            if cls.raise_it:
+                raise RuntimeError("db down")
+            return chats
+
+    class P(T):
+        alerts = []
+
+        @staticmethod
+        def _tito_discord_alert(m):
+            P.alerts.append(m)
+
+    _tito.Chats, _tito.CHATS_AVAILABLE = FakeChats, True
+    pp = P()
+    got = asyncio.run(pp.month_spend_usd(now))
+    record("B3 month_spend sums ChatModel history messages (all chats, Pacific month)",
+           abs(got - 5.0) < 1e-9, f"got={got!r} want=5.0")
+    asyncio.run(pp.month_spend_usd(now))
+    record("B3 month_spend 60s cache", FakeChats.calls == 1, f"calls={FakeChats.calls}")
+    FakeChats.raise_it = True
+    p2 = P()
+    got2 = asyncio.run(p2.month_spend_usd(now))
+    record("B3 DB error fail-open 0.0 + Discord alert", got2 == 0.0 and len(P.alerts) == 1,
+           f"got={got2!r} alerts={P.alerts!r}")
+
+    # ---- N1: system split ----
+    H = T.TITO_SNAPSHOT_HEADING
+    record("N1 heading literal", H == "NHỮNG ĐIỀU TITO NHỚ VỀ ÔNG", repr(H))
+    one = [{"type": "text", "text": "persona text\n\n" + H + "\n- fact"}]
+    out = T._tito_split_system(one)
+    record("N1 single string split into 2 blocks",
+           len(out) == 2 and out[0]["text"] == "persona text"
+           and out[1]["text"] == H + "\n- fact", repr(out))
+    two = [{"type": "text", "text": "a"}, {"type": "text", "text": H + "\nx"}]
+    record("N1 already 2 parts untouched", T._tito_split_system(two) == two)
+    plain = [{"type": "text", "text": "no snapshot"}]
+    record("N1 no heading untouched", T._tito_split_system(plain) == plain)
+
+    # ---- N2: frozen tools loud once per process ----
+    class P2(T):
+        alerts = []
+        _tito_tools_alerted = False
+
+        @staticmethod
+        def _tito_discord_alert(m):
+            P2.alerts.append(m)
+
+    import logging as _lg
+    recs = []
+
+    class H_(_lg.Handler):
+        def emit(self, r):
+            recs.append(r)
+
+    h = H_()
+    _tito.logger.addHandler(h)
+    saved = os.environ.get("TITO_TOOLS_FILE")
+    try:
+        os.environ.pop("TITO_TOOLS_FILE", None)
+        r1 = P2._tito_frozen_tools()
+        os.environ["TITO_TOOLS_FILE"] = "/nonexistent/tools.json"
+        r2 = P2._tito_frozen_tools()
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write("[]")
+            empty = fh.name
+        os.environ["TITO_TOOLS_FILE"] = empty
+        r3 = P2._tito_frozen_tools()
+        Path(empty).unlink(missing_ok=True)
+    finally:
+        _tito.logger.removeHandler(h)
+        if saved is None:
+            os.environ.pop("TITO_TOOLS_FILE", None)
+        else:
+            os.environ["TITO_TOOLS_FILE"] = saved
+    record("N2 missing/unreadable/empty -> [] and ERROR logged each time",
+           r1 == r2 == r3 == [] and sum(1 for r in recs if r.levelno >= _lg.ERROR) == 3,
+           f"errors={sum(1 for r in recs if r.levelno >= _lg.ERROR)}")
+    record("N2 Discord alert exactly once per process", len(P2.alerts) == 1, repr(P2.alerts))
+
+    # ---- N3: alert text hygiene ----
+    e = RuntimeError("boom " + "x" * 2000 + " x-api-key: sk-ant-api03-SECRETSECRET123 Authorization: Bearer tok_abcdef")
+    msg = T._tito_safe_err(e)
+    record("N3 alert text truncated to 500", len(msg) <= 500, str(len(msg)))
+    e2 = RuntimeError("401 x-api-key: sk-ant-api03-SECRETSECRET123 Authorization: Bearer tok_abcdef")
+    m2 = T._tito_safe_err(e2)
+    record("N3 alert text has no key/auth header values",
+           "SECRETSECRET" not in m2 and "tok_abcdef" not in m2, m2)
+
+    # ---- N4: hard-cap path returns text, does not also emit it ----
+    orch = (SRC / "pipe_orchestrator.py").read_text(encoding="utf-8")
+    i = orch.index("_decision == \"hard\"")
+    block = orch[i:i + 400]
+    record("N4 hard cap returns text without emit_message_delta (no duplicate)",
+           "return _hard_text" in block and "emit_message_delta" not in block, block[:200])
+
+
 def main():
+    _run_review_fix_checks()
     _run_tools_checks()
     _run_cache_checks()
     asyncio.run(_run_payload_checks(_load_payload()))

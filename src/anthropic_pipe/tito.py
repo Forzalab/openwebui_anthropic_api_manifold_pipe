@@ -100,13 +100,13 @@ class PipeTitoMethods:
         except (TypeError, ValueError):
             return default
 
-    @staticmethod
-    def _tito_budget_decision(month_spend_usd: float):
+    @classmethod
+    def _tito_budget_decision(cls, month_spend_usd: float):
         """Pure decision function: (status, message) for a month's spend."""
-        hard = PipeTitoMethods._tito_cap("TITO_HARD_CAP_USD", 22.0)
-        soft = PipeTitoMethods._tito_cap("TITO_SOFT_CAP_USD", 15.0)
+        hard = cls._tito_cap("TITO_HARD_CAP_USD", 22.0)
+        soft = cls._tito_cap("TITO_SOFT_CAP_USD", 15.0)
         if month_spend_usd >= hard:
-            return ("hard", PipeTitoMethods.HARD_CAP_TEXT)
+            return ("hard", cls.HARD_CAP_TEXT)
         if month_spend_usd >= soft:
             return ("soft", None)
         return ("ok", None)
@@ -129,12 +129,12 @@ class PipeTitoMethods:
         dst_end = _nth_sunday(dt.year, 11, 1) + _td(hours=9)    # 02:00 PDT
         return -7 if dst_start <= dt < dst_end else -8
 
-    @staticmethod
-    def _tito_pacific_month(dt) -> str:
+    @classmethod
+    def _tito_pacific_month(cls, dt) -> str:
         """Calendar month key (``YYYY-MM``) for ``dt`` in America/Los_Angeles."""
         from datetime import timedelta as _td
 
-        offset = PipeTitoMethods._tito_pacific_utc_offset(dt)
+        offset = cls._tito_pacific_utc_offset(dt)
         return (dt + _td(hours=offset)).strftime("%Y-%m")
 
     @staticmethod
@@ -146,14 +146,14 @@ class PipeTitoMethods:
         raw = f"{type(exc).__name__}: {exc}"
         raw = _re.sub(r"sk-[A-Za-z0-9_\-]{8,}", "[redacted]", raw)
         raw = _re.sub(
-            r"(?i)(x-api-key|authorization|api[_-]?key|bearer)(['\"]?\s*[:=]?\s*)[^\s,'\"}]+",
+            r"(?i)(x-api-key|authorization|api[_-]?key|bearer)(['\"]?\s*[:=]?\s*)(?:Bearer\s+)?[^\s,'\"}]+",
             r"\1\2[redacted]",
             raw,
         )
         return raw[:limit]
 
-    @staticmethod
-    def _tito_split_system(system):
+    @classmethod
+    def _tito_split_system(cls, system):
         """N1: one system text block holding ``"\n\n" + heading`` becomes two blocks
         so each gets its own cache breakpoint. Already-split input is unchanged."""
         if not isinstance(system, list) or len(system) != 1:
@@ -162,18 +162,18 @@ class PipeTitoMethods:
         if not isinstance(blk, dict) or blk.get("type", "text") != "text":
             return system
         text = blk.get("text")
-        marker = "\n\n" + PipeTitoMethods.TITO_SNAPSHOT_HEADING
+        marker = "\n\n" + cls.TITO_SNAPSHOT_HEADING
         if not isinstance(text, str) or marker not in text:
             return system
         head, _, tail = text.partition(marker)
         if not head.strip():
             return system
         first = dict(blk, text=head)
-        second = dict(blk, text=PipeTitoMethods.TITO_SNAPSHOT_HEADING + tail)
+        second = dict(blk, text=cls.TITO_SNAPSHOT_HEADING + tail)
         return [first, second]
 
-    @staticmethod
-    def _tito_frozen_tools() -> list:
+    @classmethod
+    def _tito_frozen_tools(cls) -> list:
         """Load the frozen tools array from ``TITO_TOOLS_FILE`` (JSON list).
 
         Missing / unreadable / empty is loud: ERROR log + one Discord alert per
@@ -193,29 +193,29 @@ class PipeTitoMethods:
                 if not tools:
                     problem = f"TITO_TOOLS_FILE {path} has no tools"
             except Exception as e:
-                problem = f"TITO_TOOLS_FILE {path} unreadable: {PipeTitoMethods._tito_safe_err(e)}"
+                problem = f"TITO_TOOLS_FILE {path} unreadable: {cls._tito_safe_err(e)}"
         if problem:
             logger.error("[TITO] frozen tools unavailable: %s", problem)
-            if not PipeTitoMethods._tito_tools_alerted:
-                PipeTitoMethods._tito_tools_alerted = True
-                PipeTitoMethods._tito_discord_alert(f"Tito: frozen tools unavailable: {problem}")
+            if not cls._tito_tools_alerted:
+                cls._tito_tools_alerted = True
+                cls._tito_discord_alert(f"Tito: frozen tools unavailable: {problem}")
         return tools
 
-    @staticmethod
-    def _strip_cache_control(node):
+    @classmethod
+    def _strip_cache_control(cls, node):
         """Recursively drop ``cache_control`` markers (placement hints, not content)."""
         if isinstance(node, dict):
             return {
-                k: PipeTitoMethods._strip_cache_control(v)
+                k: cls._strip_cache_control(v)
                 for k, v in node.items()
                 if k != "cache_control"
             }
         if isinstance(node, list):
-            return [PipeTitoMethods._strip_cache_control(v) for v in node]
+            return [cls._strip_cache_control(v) for v in node]
         return node
 
-    @staticmethod
-    def _tito_fingerprint_shas(payload: dict):
+    @classmethod
+    def _tito_fingerprint_shas(cls, payload: dict):
         """Return ``(sha256_tools, sha256_system)`` over the canonicalized payload."""
         def _ser(x):
             if not x:
@@ -224,16 +224,16 @@ class PipeTitoMethods:
                 x, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str
             )
 
-        tools = PipeTitoMethods._strip_cache_control(payload.get("tools") or [])
-        system = PipeTitoMethods._strip_cache_control(payload.get("system") or [])
+        tools = cls._strip_cache_control(payload.get("tools") or [])
+        system = cls._strip_cache_control(payload.get("system") or [])
         tools_sha = hashlib.sha256(_ser(tools).encode("utf-8")).hexdigest()
         system_sha = hashlib.sha256(_ser(system).encode("utf-8")).hexdigest()
         return tools_sha, system_sha
 
-    @staticmethod
-    def _tito_fingerprint(payload: dict) -> str:
+    @classmethod
+    def _tito_fingerprint(cls, payload: dict) -> str:
         """One log line summarising the outgoing payload's stable identifiers."""
-        tools_sha, system_sha = PipeTitoMethods._tito_fingerprint_shas(payload)
+        tools_sha, system_sha = cls._tito_fingerprint_shas(payload)
         model = payload.get("model", "")
         thinking = payload.get("thinking") or {}
         thinking_s = thinking.get("type", "") if isinstance(thinking, dict) else str(thinking)
@@ -249,20 +249,20 @@ class PipeTitoMethods:
             f"model={model} thinking={thinking_s} effort={effort} betas={betas_csv}"
         )
 
-    @staticmethod
-    def _tito_missing_tool_result(tool_use_id: str = "", tool_name: str = "") -> dict:
+    @classmethod
+    def _tito_missing_tool_result(cls, tool_use_id: str = "", tool_name: str = "") -> dict:
         """The ``is_error`` tool_result returned when a frozen tool has no live callable."""
         return {
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": PipeTitoMethods.TITO_MISSING_TOOL_TEXT,
+            "content": cls.TITO_MISSING_TOOL_TEXT,
             "is_error": True,
         }
 
-    @staticmethod
-    def _tito_error_text() -> str:
+    @classmethod
+    def _tito_error_text(cls) -> str:
         """The fixed Vietnamese line shown to the user on any Tito API error."""
-        return PipeTitoMethods.TITO_ERROR_TEXT
+        return cls.TITO_ERROR_TEXT
 
     @staticmethod
     def _tito_discord_alert(message: str) -> None:
@@ -308,8 +308,8 @@ class PipeTitoMethods:
             return [m for m in msgs.values() if isinstance(m, dict)]
         return []
 
-    @staticmethod
-    def _tito_message_month(msg, dt) -> "str | None":
+    @classmethod
+    def _tito_message_month(cls, msg, dt) -> "str | None":
         """Pacific month key for a message's timestamp, or None when absent/garbage."""
         if not isinstance(msg, dict):
             return None
@@ -322,8 +322,8 @@ class PipeTitoMethods:
             if isinstance(ts, datetime):
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=_tz.utc)
-                return PipeTitoMethods._tito_pacific_month(ts.astimezone(_tz.utc))
-            return PipeTitoMethods._tito_pacific_month(
+                return cls._tito_pacific_month(ts.astimezone(_tz.utc))
+            return cls._tito_pacific_month(
                 _dt.fromtimestamp(float(ts), tz=_tz.utc)
             )
         except (TypeError, ValueError, OSError, OverflowError):

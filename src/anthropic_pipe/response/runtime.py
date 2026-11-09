@@ -181,7 +181,7 @@ class PipeStreamRuntimeSupportMethods:
             if not tito_active:
                 return default
             self._tito_discord_alert(
-                f"Tito: Anthropic API error ({type(exc).__name__}): {exc}"
+                f"Tito: Anthropic API error: {self._tito_safe_err(exc)}"
             )
             return self._tito_error_text()
 
@@ -501,7 +501,9 @@ class PipeStreamRuntimeSupportMethods:
         """
         raw = f"{type(exception).__name__}: {exception}"
         logger.error("Tito API error (mapped to Vietnamese): %s", raw)
-        self._tito_discord_alert(f"Tito: Anthropic API error: {raw}")
+        self._tito_discord_alert(
+            f"Tito: Anthropic API error: {self._tito_safe_err(exception)}"
+        )
 
         await self.emit_event(
             {

@@ -788,6 +788,10 @@ async def create_request_payload(
         system_messages = system_messages + [_terminal_hint]
 
     # Processing Messages and Caching
+    if is_tito and system_messages:
+        _split = getattr(pipe, "_tito_split_system", None)
+        if callable(_split):
+            system_messages = _split(system_messages)
     if system_messages and len(system_messages) > 0:
         payload["system"] = system_messages
 

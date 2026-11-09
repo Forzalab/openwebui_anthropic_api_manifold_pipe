@@ -1218,6 +1218,10 @@ async def create_request_payload(
                            else ([{"type": "text", "text": str(system_messages)}] if system_messages else []))
         system_messages = system_messages + [_terminal_hint]
 
+    if is_tito and system_messages:
+        _split = getattr(pipe, "_tito_split_system", None)
+        if callable(_split):
+            system_messages = _split(system_messages)
     if system_messages and len(system_messages) > 0:
         payload["system"] = system_messages
 
@@ -7161,7 +7165,7 @@ class Pipe:
             if not tito_active:
                 return default
             self._tito_discord_alert(
-                f"Tito: Anthropic API error ({type(exc).__name__}): {exc}"
+                f"Tito: Anthropic API error: {self._tito_safe_err(exc)}"
             )
             return self._tito_error_text()
 
@@ -7464,7 +7468,9 @@ class Pipe:
     ):
         raw = f"{type(exception).__name__}: {exception}"
         logger.error("Tito API error (mapped to Vietnamese): %s", raw)
-        self._tito_discord_alert(f"Tito: Anthropic API error: {raw}")
+        self._tito_discord_alert(
+            f"Tito: Anthropic API error: {self._tito_safe_err(exception)}"
+        )
 
         await self.emit_event(
             {
@@ -7681,7 +7687,7 @@ class Pipe:
                 _decision, _hard_text = self._tito_budget_decision(_spend)
                 if _decision == "hard":
                     logger.warning("Tito hard budget cap reached: spend=%s", _spend)
-                    await emit_message_delta(_hard_text)
+
                     return _hard_text
                 if _decision == "soft":
                     _month_key = self._tito_pacific_month(_now)
@@ -8922,6 +8928,10 @@ class Pipe:
         "always_strip_tool_manifest": True,
     }
 
+    TITO_SNAPSHOT_HEADING = "NHỮNG ĐIỀU TITO NHỚ VỀ ÔNG"
+    _TITO_ALERT_MAX = 500
+    _tito_tools_alerted = False
+
     HARD_CAP_TEXT = "Tito đang nghỉ tới ngày 1 tháng sau. Dori đã biết rồi, ông không cần làm gì."
     TITO_ERROR_TEXT = "Tito đang bận một chút, ông thử lại sau vài phút nhé."
     TITO_MISSING_TOOL_TEXT = "Lịch tạm thời không dùng được, ông thử lại lát nữa nhé."
@@ -8951,12 +8961,12 @@ class Pipe:
         except (TypeError, ValueError):
             return default
 
-    @staticmethod
-    def _tito_budget_decision(month_spend_usd: float):
-        hard = PipeTitoMethods._tito_cap("TITO_HARD_CAP_USD", 22.0)
-        soft = PipeTitoMethods._tito_cap("TITO_SOFT_CAP_USD", 15.0)
+    @classmethod
+    def _tito_budget_decision(cls, month_spend_usd: float):
+        hard = cls._tito_cap("TITO_HARD_CAP_USD", 22.0)
+        soft = cls._tito_cap("TITO_SOFT_CAP_USD", 15.0)
         if month_spend_usd >= hard:
-            return ("hard", PipeTitoMethods.HARD_CAP_TEXT)
+            return ("hard", cls.HARD_CAP_TEXT)
         if month_spend_usd >= soft:
             return ("soft", None)
         return ("ok", None)
@@ -8974,41 +8984,82 @@ class Pipe:
         dst_end = _nth_sunday(dt.year, 11, 1) + _td(hours=9)
         return -7 if dst_start <= dt < dst_end else -8
 
-    @staticmethod
-    def _tito_pacific_month(dt) -> str:
+    @classmethod
+    def _tito_pacific_month(cls, dt) -> str:
         from datetime import timedelta as _td
 
-        offset = PipeTitoMethods._tito_pacific_utc_offset(dt)
+        offset = cls._tito_pacific_utc_offset(dt)
         return (dt + _td(hours=offset)).strftime("%Y-%m")
 
     @staticmethod
-    def _tito_frozen_tools() -> list:
-        path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
-        if not path:
-            return []
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception:
-            return []
-        if not isinstance(data, list):
-            return []
-        return [t for t in data if isinstance(t, dict)]
+    def _tito_safe_err(exc, limit: int = 500) -> str:
+        import re as _re
 
-    @staticmethod
-    def _strip_cache_control(node):
+        raw = f"{type(exc).__name__}: {exc}"
+        raw = _re.sub(r"sk-[A-Za-z0-9_\-]{8,}", "[redacted]", raw)
+        raw = _re.sub(
+            r"(?i)(x-api-key|authorization|api[_-]?key|bearer)(['\"]?\s*[:=]?\s*)(?:Bearer\s+)?[^\s,'\"}]+",
+            r"\1\2[redacted]",
+            raw,
+        )
+        return raw[:limit]
+
+    @classmethod
+    def _tito_split_system(cls, system):
+        if not isinstance(system, list) or len(system) != 1:
+            return system
+        blk = system[0]
+        if not isinstance(blk, dict) or blk.get("type", "text") != "text":
+            return system
+        text = blk.get("text")
+        marker = "\n\n" + cls.TITO_SNAPSHOT_HEADING
+        if not isinstance(text, str) or marker not in text:
+            return system
+        head, _, tail = text.partition(marker)
+        if not head.strip():
+            return system
+        first = dict(blk, text=head)
+        second = dict(blk, text=cls.TITO_SNAPSHOT_HEADING + tail)
+        return [first, second]
+
+    @classmethod
+    def _tito_frozen_tools(cls) -> list:
+        path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
+        problem = None
+        tools: list = []
+        if not path:
+            problem = "TITO_TOOLS_FILE is not set"
+        else:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, list):
+                    tools = [t for t in data if isinstance(t, dict)]
+                if not tools:
+                    problem = f"TITO_TOOLS_FILE {path} has no tools"
+            except Exception as e:
+                problem = f"TITO_TOOLS_FILE {path} unreadable: {cls._tito_safe_err(e)}"
+        if problem:
+            logger.error("[TITO] frozen tools unavailable: %s", problem)
+            if not cls._tito_tools_alerted:
+                cls._tito_tools_alerted = True
+                cls._tito_discord_alert(f"Tito: frozen tools unavailable: {problem}")
+        return tools
+
+    @classmethod
+    def _strip_cache_control(cls, node):
         if isinstance(node, dict):
             return {
-                k: PipeTitoMethods._strip_cache_control(v)
+                k: cls._strip_cache_control(v)
                 for k, v in node.items()
                 if k != "cache_control"
             }
         if isinstance(node, list):
-            return [PipeTitoMethods._strip_cache_control(v) for v in node]
+            return [cls._strip_cache_control(v) for v in node]
         return node
 
-    @staticmethod
-    def _tito_fingerprint_shas(payload: dict):
+    @classmethod
+    def _tito_fingerprint_shas(cls, payload: dict):
         def _ser(x):
             if not x:
                 return ""
@@ -9016,15 +9067,15 @@ class Pipe:
                 x, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str
             )
 
-        tools = PipeTitoMethods._strip_cache_control(payload.get("tools") or [])
-        system = PipeTitoMethods._strip_cache_control(payload.get("system") or [])
+        tools = cls._strip_cache_control(payload.get("tools") or [])
+        system = cls._strip_cache_control(payload.get("system") or [])
         tools_sha = hashlib.sha256(_ser(tools).encode("utf-8")).hexdigest()
         system_sha = hashlib.sha256(_ser(system).encode("utf-8")).hexdigest()
         return tools_sha, system_sha
 
-    @staticmethod
-    def _tito_fingerprint(payload: dict) -> str:
-        tools_sha, system_sha = PipeTitoMethods._tito_fingerprint_shas(payload)
+    @classmethod
+    def _tito_fingerprint(cls, payload: dict) -> str:
+        tools_sha, system_sha = cls._tito_fingerprint_shas(payload)
         model = payload.get("model", "")
         thinking = payload.get("thinking") or {}
         thinking_s = thinking.get("type", "") if isinstance(thinking, dict) else str(thinking)
@@ -9040,18 +9091,18 @@ class Pipe:
             f"model={model} thinking={thinking_s} effort={effort} betas={betas_csv}"
         )
 
-    @staticmethod
-    def _tito_missing_tool_result(tool_use_id: str = "", tool_name: str = "") -> dict:
+    @classmethod
+    def _tito_missing_tool_result(cls, tool_use_id: str = "", tool_name: str = "") -> dict:
         return {
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": PipeTitoMethods.TITO_MISSING_TOOL_TEXT,
+            "content": cls.TITO_MISSING_TOOL_TEXT,
             "is_error": True,
         }
 
-    @staticmethod
-    def _tito_error_text() -> str:
-        return PipeTitoMethods.TITO_ERROR_TEXT
+    @classmethod
+    def _tito_error_text(cls) -> str:
+        return cls.TITO_ERROR_TEXT
 
     @staticmethod
     def _tito_discord_alert(message: str) -> None:
@@ -9085,13 +9136,18 @@ class Pipe:
     @staticmethod
     def _tito_chat_messages(chat) -> list:
         if isinstance(chat, dict):
-            msgs = chat.get("messages")
+            body = chat.get("chat") if isinstance(chat.get("chat"), dict) else chat
         else:
-            msgs = getattr(chat, "messages", None)
-        return msgs if isinstance(msgs, list) else []
+            body = getattr(chat, "chat", None)
+        if not isinstance(body, dict):
+            return []
+        msgs = (body.get("history") or {}).get("messages")
+        if isinstance(msgs, dict):
+            return [m for m in msgs.values() if isinstance(m, dict)]
+        return []
 
-    @staticmethod
-    def _tito_message_month(msg, dt) -> "str | None":
+    @classmethod
+    def _tito_message_month(cls, msg, dt) -> "str | None":
         if not isinstance(msg, dict):
             return None
         ts = msg.get("timestamp") or msg.get("created_at") or msg.get("updated_at")
@@ -9103,8 +9159,8 @@ class Pipe:
             if isinstance(ts, datetime):
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=_tz.utc)
-                return PipeTitoMethods._tito_pacific_month(ts.astimezone(_tz.utc))
-            return PipeTitoMethods._tito_pacific_month(
+                return cls._tito_pacific_month(ts.astimezone(_tz.utc))
+            return cls._tito_pacific_month(
                 _dt.fromtimestamp(float(ts), tz=_tz.utc)
             )
         except (TypeError, ValueError, OSError, OverflowError):
@@ -9151,7 +9207,9 @@ class Pipe:
         except Exception as e:
             total = 0.0
             logger.warning("Tito month_spend_usd DB error (fail-open): %s", e)
-            self._tito_discord_alert(f"Tito: month_spend_usd DB error (fail-open): {e}")
+            self._tito_discord_alert(
+                f"Tito: month_spend_usd DB error (fail-open): {self._tito_safe_err(e)}"
+            )
 
         setattr(self, "_tito_spend_cache", (total, time.time()))
         return total
