@@ -173,6 +173,18 @@ class PipeStreamRuntimeSupportMethods:
         max_retries = self.valves.MAX_RETRIES
         status = StatusEmitter(request_ctx.emit_event)
 
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
+
+        def _final_suffix(default: str) -> str:
+            """P5: for Tito the final error line is the fixed Vietnamese text."""
+            if not tito_active:
+                return default
+            self._tito_discord_alert(
+                f"Tito: Anthropic API error ({type(exc).__name__}): {exc}"
+            )
+            return self._tito_error_text()
+
         non_retry_map: dict[type[Exception], str] = {
             RateLimitError: f"\n\n⚠️ Rate limit exceeded - maximum retries ({max_retries}) reached. Please try again later.",
             AuthenticationError: f"\n\nError: API key issues. Reason: {getattr(exc, 'message', str(exc))}",
@@ -185,7 +197,7 @@ class PipeStreamRuntimeSupportMethods:
         for error_type, suffix in non_retry_map.items():
             if isinstance(exc, error_type):
                 await self.handle_errors(exc, request_ctx.event_emitter)
-                return (False, retry_attempts, suffix)
+                return (False, retry_attempts, _final_suffix(suffix))
 
         retryable_with_status: list[tuple[type[Exception], str, str]] = [
             (OverloadedError, "⏳ API overloaded, retrying...", "🔧 API overloaded"),
@@ -364,6 +376,13 @@ class PipeStreamRuntimeSupportMethods:
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
         """Map an exception to a user-facing message and emit error/status events."""
+        # P5: for Tito every API error maps to the fixed Vietnamese line; the raw
+        # error goes to Discord, never to the user (no traceback "source" event).
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is not None and _tito_cv.get():
+            await self._tito_handle_error(exception, __event_emitter__)
+            return
+
         # Determine specific error message based on exception type
         if isinstance(exception, RateLimitError):
             error_msg = "Rate limit exceeded. Please wait before making more requests."
@@ -458,6 +477,35 @@ class PipeStreamRuntimeSupportMethods:
                     "description": "❌ Response with Errors",
                     "done": True,
                 },
+            },
+            __event_emitter__,
+        )
+
+    async def _tito_handle_error(
+        self,
+        exception,
+        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ):
+        """Tito's error path (P5): Vietnamese line to the user, raw error to Discord.
+
+        Deliberately omits the ``source``/traceback event the non-tito path
+        emits — that would leak the raw error into the chat.
+        """
+        raw = f"{type(exception).__name__}: {exception}"
+        logger.error("Tito API error (mapped to Vietnamese): %s", raw)
+        self._tito_discord_alert(f"Tito: Anthropic API error: {raw}")
+
+        await self.emit_event(
+            {
+                "type": "notification",
+                "data": {"type": "error", "content": self._tito_error_text()},
+            },
+            __event_emitter__,
+        )
+        await self.emit_event(
+            {
+                "type": "status",
+                "data": {"description": "❌ Response with Errors", "done": True},
             },
             __event_emitter__,
         )

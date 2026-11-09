@@ -683,11 +683,31 @@ class PipeCacheControlMethods:
         """Place the messages breakpoint on the newest message that will replay
         byte-identically next turn, skipping volatile per-request context and
         thinking/redacted_thinking blocks.
+
+        Also skips ``role:"system"`` messages: a mid-conversation system message
+        (PATCH D) must never carry the breakpoint — if the newest message is one,
+        the breakpoint moves to the preceding cacheable message. Non-tito
+        ``messages[]`` never contain system messages, so this is a no-op there.
         """
         if not messages:
             return
 
         last = messages[-1]
+        if isinstance(last, dict) and last.get("role") == "system":
+            for msg in reversed(messages[:-1]):
+                if not isinstance(msg, dict) or msg.get("role") == "system":
+                    continue
+                volatile_at = self._first_volatile_block_index(msg)
+                if volatile_at is not None:
+                    if volatile_at > 0:
+                        self._place_cache_on_last_cacheable_block(
+                            msg.get("content", [])[:volatile_at]
+                        )
+                    return
+                self._place_cache_on_last_cacheable_block(msg.get("content", []))
+                return
+            return
+
         volatile_at = self._first_volatile_block_index(last)
 
         if volatile_at is None:
