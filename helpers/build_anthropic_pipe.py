@@ -74,6 +74,7 @@ METHOD_GROUP_SOURCES = [
     SRC_DIR / "shared" / "tasks.py",
     SRC_DIR / "response" / "runtime.py",
     SRC_DIR / "pipe_orchestrator.py",
+    SRC_DIR / "tito.py",
 ]
 
 BEGIN_PAYLOAD, END_PAYLOAD = _markers("request_payload")

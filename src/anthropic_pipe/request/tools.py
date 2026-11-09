@@ -31,6 +31,11 @@ class PipeRequestToolsMethods:
         Returns:
             tuple: (Tools in Claude API format, set of API-provided tool names without callables)
         """
+        # Tito (B4/C3): a byte-stable frozen tools array replaces the live set.
+        _is_tito = getattr(self, "_is_tito", None)
+        if _is_tito is not None and _is_tito(__metadata__):
+            return self._convert_tito_tools(actual_model_name, __user__, __metadata__)
+
         claude_tools = []
         tool_names_seen = set()  # Track unique tool names
         api_tool_names = set()  # Track tools from body.tools (no callable, API passthrough)
@@ -478,6 +483,78 @@ class PipeRequestToolsMethods:
             logger.debug(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
 
         return claude_tools, api_tool_names
+
+    def _convert_tito_tools(
+        self,
+        actual_model_name: str,
+        __user__: Dict[str, Any],
+        __metadata__: dict[str, Any],
+    ) -> tuple[List[dict], set]:
+        """Build the Tito tools array (SPEC §2.2 + §5).
+
+        Frozen user tools come from ``TITO_TOOLS_FILE`` (byte-stable across
+        outages); the advisor and web_search/web_fetch server tools are built
+        from ``TITO_CONFIG`` regardless of the matching valves. No deferral, no
+        downgrade guard, no dynamic filtering.
+        """
+        tito_cfg = self._tito_config()
+        tools: List[dict] = []
+        names_seen: set[str] = set()
+
+        frozen_fn = getattr(self, "_tito_frozen_tools", None)
+        frozen = frozen_fn() if frozen_fn is not None else []
+        for t in frozen:
+            if not isinstance(t, dict):
+                continue
+            name = t.get("name")
+            if name and name not in names_seen:
+                tools.append(t)
+                names_seen.add(name)
+
+        # Advisor: always on for tito; the executor->advisor downgrade guard is
+        # deliberately skipped (Sonnet-5-5 -> Opus-5-5 is a valid pair).
+        advisor_cfg = tito_cfg.get("advisor") or {}
+        if advisor_cfg.get("enabled", True):
+            advisor: dict = {
+                "type": "advisor_20260301",
+                "name": "advisor",
+                "model": advisor_cfg.get("model") or "claude-opus-5-5",
+            }
+            max_uses = advisor_cfg.get("max_uses")
+            if max_uses:
+                advisor["max_uses"] = max_uses
+            caching = advisor_cfg.get("caching")
+            if caching and caching != "off":
+                advisor["caching"] = {"type": "ephemeral", "ttl": caching}
+            tools.append(advisor)
+            names_seen.add("advisor")
+
+        # web_search: pinned to web_search_20250305 (no dynamic filtering), with
+        # the Tito max_uses and user_location (only non-empty fields).
+        web_search_enabled = self.valves.WEB_SEARCH or (__metadata__ or {}).get(
+            "web_search_enforced", False
+        )
+        if web_search_enabled and self.get_model_info(actual_model_name).get(
+            "supports_web_search_tool", True
+        ):
+            ws: dict = {"type": "web_search_20250305", "name": "web_search"}
+            ws["max_uses"] = tito_cfg.get("web_search_max_uses", 10)
+            loc_fields = {
+                k: v for k, v in (tito_cfg.get("user_location") or {}).items() if v
+            }
+            if loc_fields:
+                ws["user_location"] = {"type": "approximate", **loc_fields}
+            tools.append(ws)
+            names_seen.add("web_search")
+
+        # web_fetch: default max_uses, pinned for stability.
+        if self.valves.WEB_FETCH:
+            wf: dict = {"type": "web_fetch_20250910", "name": "web_fetch"}
+            wf["max_uses"] = tito_cfg.get("web_fetch_max_uses", 5)
+            tools.append(wf)
+            names_seen.add("web_fetch")
+
+        return tools, set()
 
     def _native_tool_search_active(self, actual_model_name: str, __user__: Dict[str, Any]) -> bool:
         """Claude's own tool search (defer_loading) applies to this request.

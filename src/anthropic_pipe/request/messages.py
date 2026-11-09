@@ -11,6 +11,8 @@ class PipeRequestMessagesMethods:
         self, raw_messages
     ) -> tuple[list[dict], list[dict], list[str]]:
         """Convert a raw OpenWebUI message list into Claude system/processed messages plus extracted marker metadata."""
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
         processed_messages: list[Dict[str, Any]] = []
         extracted_memories = None
         previous_marker_metadata: list[str] = []
@@ -79,6 +81,25 @@ class PipeRequestMessagesMethods:
             if not claude_message:
                 continue
             if role == "system":
+                # PATCH D: a mid-conversation system message is replayed in
+                # messages[] (never folded into `system`) with clear_at.
+                if tito_active and msg.get("mid_conversation") is True:
+                    blocks = [
+                        b
+                        for b in claude_message
+                        if isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and b.get("text", "").strip()
+                    ]
+                    if blocks:
+                        processed_messages.append(
+                            {
+                                "role": "system",
+                                "content": blocks,
+                                "clear_at": "next_user_message",
+                            }
+                        )
+                    continue
                 for block in claude_message:
                     text = block["text"]
 
@@ -130,6 +151,28 @@ class PipeRequestMessagesMethods:
                                 "text": f"{MEMORY_CONTEXT_APPENDIX_HEADER}{extracted_memories}",
                             }
                         )
+
+        # PATCH D orphan drop: a mid-conversation system message whose next
+        # replayed message is not an assistant turn (and which is not the last
+        # message) is dropped — replaying user, system, user is a permanent 400.
+        if tito_active:
+            _filtered: list[dict] = []
+            _n = len(processed_messages)
+            for _idx, _m in enumerate(processed_messages):
+                _is_mid = (
+                    isinstance(_m, dict)
+                    and _m.get("role") == "system"
+                    and (
+                        _m.get("mid_conversation") is True
+                        or _m.get("clear_at") == "next_user_message"
+                    )
+                )
+                if _is_mid and _idx < _n - 1:
+                    _next = processed_messages[_idx + 1]
+                    if not (_next.get("role") == "assistant"):
+                        continue
+                _filtered.append(_m)
+            processed_messages = _filtered
 
         # Client-side compaction trim: drop messages before the last compaction
         # block. The API would ignore them anyway but this saves bandwidth and

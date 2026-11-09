@@ -21,7 +21,13 @@ class PipeCacheControlMethods:
         (render order is tools -> system -> messages), so tools/system may be
         longer than messages but never shorter. A configuration that inverts that
         is clamped to the messages TTL rather than sent and silently mis-billed.
+
+        Tito (P6) pins every marker to a 1h TTL regardless of the valve.
         """
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is not None and _tito_cv.get():
+            return {"type": "ephemeral", "ttl": "1h"}
+
         setting = self.valves.CACHE_TTL
         if scope == "tools_system":
             override = getattr(self.valves, "CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT", "same as CACHE_TTL")
@@ -467,6 +473,12 @@ class PipeCacheControlMethods:
         - Tool_result blocks CAN have cache_control (unless programmatic calling)
         """
         cache_level = self.valves.CACHE_CONTROL
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
+        if tito_active:
+            # P6: Tito's cache scope is pinned to the fullest level — a valve
+            # must never downgrade it to tools-only or disabled.
+            cache_level = "cache tools array, system prompt and messages"
         if cache_level == "cache disabled":
             return
 
@@ -490,7 +502,7 @@ class PipeCacheControlMethods:
         cache_marker = self._cache_control_marker("tools_system")
 
         tools = payload.get("tools", [])
-        if tools:
+        if tools and not tito_active:
             # Find last non-deferred tool for the breakpoint
             placed = False
             for i in range(len(tools) - 1, -1, -1):
@@ -508,12 +520,19 @@ class PipeCacheControlMethods:
         # --- Step 3: Cache system prompt (breakpoint 2) ---
         system = payload.get("system", [])
         if system:
-            # Find last text block with content
-            for i in range(len(system) - 1, -1, -1):
-                block = system[i]
-                if block.get("type") == "text" and block.get("text", "").strip():
-                    block["cache_control"] = cache_marker
-                    break
+            if tito_active:
+                # P6: two system breakpoints (raw prompt + memory snapshot) —
+                # cache_control goes after block1 AND block2.
+                for block in system:
+                    if isinstance(block, dict):
+                        block["cache_control"] = self._cache_control_marker("tools_system")
+            else:
+                # Find last text block with content
+                for i in range(len(system) - 1, -1, -1):
+                    block = system[i]
+                    if block.get("type") == "text" and block.get("text", "").strip():
+                        block["cache_control"] = cache_marker
+                        break
 
         if cache_level == "cache tools array and system prompt":
             return
