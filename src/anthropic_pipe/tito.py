@@ -53,6 +53,11 @@ class PipeTitoMethods:
         "always_strip_tool_manifest": True,
     }
 
+    # Copied (not imported) from open-webui backend/open_webui/utils/tito.py.
+    TITO_SNAPSHOT_HEADING = "NHỮNG ĐIỀU TITO NHỚ VỀ ÔNG"
+    _TITO_ALERT_MAX = 500
+    _tito_tools_alerted = False  # once per process
+
     HARD_CAP_TEXT = "Tito đang nghỉ tới ngày 1 tháng sau. Dori đã biết rồi, ông không cần làm gì."
     TITO_ERROR_TEXT = "Tito đang bận một chút, ông thử lại sau vài phút nhé."
     TITO_MISSING_TOOL_TEXT = "Lịch tạm thời không dùng được, ông thử lại lát nữa nhé."
@@ -133,19 +138,68 @@ class PipeTitoMethods:
         return (dt + _td(hours=offset)).strftime("%Y-%m")
 
     @staticmethod
+    def _tito_safe_err(exc, limit: int = 500) -> str:
+        """Exception text for alerts: type + message truncated to ``limit``, with
+        anything that looks like an API key / auth header value redacted."""
+        import re as _re
+
+        raw = f"{type(exc).__name__}: {exc}"
+        raw = _re.sub(r"sk-[A-Za-z0-9_\-]{8,}", "[redacted]", raw)
+        raw = _re.sub(
+            r"(?i)(x-api-key|authorization|api[_-]?key|bearer)(['\"]?\s*[:=]?\s*)[^\s,'\"}]+",
+            r"\1\2[redacted]",
+            raw,
+        )
+        return raw[:limit]
+
+    @staticmethod
+    def _tito_split_system(system):
+        """N1: one system text block holding ``"\n\n" + heading`` becomes two blocks
+        so each gets its own cache breakpoint. Already-split input is unchanged."""
+        if not isinstance(system, list) or len(system) != 1:
+            return system
+        blk = system[0]
+        if not isinstance(blk, dict) or blk.get("type", "text") != "text":
+            return system
+        text = blk.get("text")
+        marker = "\n\n" + PipeTitoMethods.TITO_SNAPSHOT_HEADING
+        if not isinstance(text, str) or marker not in text:
+            return system
+        head, _, tail = text.partition(marker)
+        if not head.strip():
+            return system
+        first = dict(blk, text=head)
+        second = dict(blk, text=PipeTitoMethods.TITO_SNAPSHOT_HEADING + tail)
+        return [first, second]
+
+    @staticmethod
     def _tito_frozen_tools() -> list:
-        """Load the frozen tools array from ``TITO_TOOLS_FILE`` (JSON list)."""
+        """Load the frozen tools array from ``TITO_TOOLS_FILE`` (JSON list).
+
+        Missing / unreadable / empty is loud: ERROR log + one Discord alert per
+        process (the tools array is part of the cache prefix).
+        """
         path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
+        problem = None
+        tools: list = []
         if not path:
-            return []
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception:
-            return []
-        if not isinstance(data, list):
-            return []
-        return [t for t in data if isinstance(t, dict)]
+            problem = "TITO_TOOLS_FILE is not set"
+        else:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, list):
+                    tools = [t for t in data if isinstance(t, dict)]
+                if not tools:
+                    problem = f"TITO_TOOLS_FILE {path} has no tools"
+            except Exception as e:
+                problem = f"TITO_TOOLS_FILE {path} unreadable: {PipeTitoMethods._tito_safe_err(e)}"
+        if problem:
+            logger.error("[TITO] frozen tools unavailable: %s", problem)
+            if not PipeTitoMethods._tito_tools_alerted:
+                PipeTitoMethods._tito_tools_alerted = True
+                PipeTitoMethods._tito_discord_alert(f"Tito: frozen tools unavailable: {problem}")
+        return tools
 
     @staticmethod
     def _strip_cache_control(node):
@@ -242,12 +296,17 @@ class PipeTitoMethods:
 
     @staticmethod
     def _tito_chat_messages(chat) -> list:
-        """Best-effort extraction of a chat's message list (dict or ORM object)."""
+        """Messages of a ChatModel (``.chat["history"]["messages"]``, dict keyed by id)."""
         if isinstance(chat, dict):
-            msgs = chat.get("messages")
+            body = chat.get("chat") if isinstance(chat.get("chat"), dict) else chat
         else:
-            msgs = getattr(chat, "messages", None)
-        return msgs if isinstance(msgs, list) else []
+            body = getattr(chat, "chat", None)
+        if not isinstance(body, dict):
+            return []
+        msgs = (body.get("history") or {}).get("messages")
+        if isinstance(msgs, dict):
+            return [m for m in msgs.values() if isinstance(m, dict)]
+        return []
 
     @staticmethod
     def _tito_message_month(msg, dt) -> "str | None":
@@ -321,7 +380,9 @@ class PipeTitoMethods:
         except Exception as e:
             total = 0.0
             logger.warning("Tito month_spend_usd DB error (fail-open): %s", e)
-            self._tito_discord_alert(f"Tito: month_spend_usd DB error (fail-open): {e}")
+            self._tito_discord_alert(
+                f"Tito: month_spend_usd DB error (fail-open): {self._tito_safe_err(e)}"
+            )
 
         setattr(self, "_tito_spend_cache", (total, time.time()))
         return total
