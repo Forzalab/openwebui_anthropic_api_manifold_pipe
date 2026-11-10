@@ -602,6 +602,10 @@ class PipeStreamRuntimeSupportMethods:
         """
         if __event_emitter__ is None:
             return
+        # Tito quiet UI: status/source/non-error notifications never reach the
+        # frontend. Message and error events are untouched (see status_events).
+        if _should_drop_event(event):
+            return
         try:
             await __event_emitter__(event)
         except Exception as e:

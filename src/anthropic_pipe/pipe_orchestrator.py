@@ -26,6 +26,10 @@ class PipeOrchestratorMethods:
         # =========================================================================
         # PHASE 1: RESPONSE ACCUMULATION STATE
         # =========================================================================
+        # Tito quiet UI: hide status lines, source chips and info toasts for the
+        # Tito model. Set before StatusEmitter is built so every construction
+        # site sees it; non-Tito requests reset it to False every turn.
+        QUIET_UI.set(self._tito_quiet_ui(__metadata__))
         request_ctx = PipeRequestContext(pipe=self, event_emitter=__event_emitter__)
         final_message = request_ctx.final_message
         emit_event_local = request_ctx.emit_event

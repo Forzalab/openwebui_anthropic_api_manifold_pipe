@@ -1009,6 +1009,11 @@ class Pipe:
             description="AWS 'Claude on AWS' workspace id. When set, sent as the 'anthropic-workspace-id' "
             "header on every request. Required when ANTHROPIC_BASE_URL points at an aws-external-anthropic endpoint.",
         )
+        TITO_QUIET_UI: bool = Field(
+            default=True,
+            description="Hide status lines, sources and info notifications when the request model is Tito "
+            "(tito.TITO_MODEL_ID). Errors still show.",
+        )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
             description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",

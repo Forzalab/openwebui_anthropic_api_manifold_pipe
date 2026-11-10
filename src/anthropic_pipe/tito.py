@@ -71,6 +71,12 @@ class PipeTitoMethods:
         """
         return (metadata or {}).get("model", {}).get("id") == "tito"
 
+    def _tito_quiet_ui(self, metadata) -> bool:
+        """True when Tito's quiet UI applies: Tito request AND the valve is on."""
+        return bool(
+            getattr(self.valves, "TITO_QUIET_UI", True) and self._is_tito(metadata)
+        )
+
     def _tito_config(self) -> dict:
         """Return the frozen Tito config (a shallow copy to avoid in-place edits)."""
         return dict(self.TITO_CONFIG)

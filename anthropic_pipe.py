@@ -1891,10 +1891,38 @@ class HandlerRegistry:
 # END GENERATED SECTION: anthropic_pipe.response.registry
 
 # BEGIN GENERATED SECTION: anthropic_pipe.response.status_events
+# Tito quiet UI, resolved once per request in ``pipe()``. A ContextVar (rather
+# than a StatusEmitter ctor arg at every construction site) keeps the change in
+# one place: the same Pipe object serves concurrent requests. Only status,
+# source and non-error notification events are affected; message/replace and
+# error notifications pass through untouched.
+QUIET_UI: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "anthropic_pipe_quiet_ui", default=False
+)
+
+
+def _should_drop_event(event: dict[str, Any], quiet: bool | None = None) -> bool:
+    if quiet is None:
+        quiet = QUIET_UI.get()
+    if not quiet:
+        return False
+    event_type = event.get("type")
+    if event_type in ("status", "source"):
+        return True
+    if event_type == "notification":
+        return (event.get("data") or {}).get("type") != "error"
+    return False
+
+
 class StatusEmitter:
-    def __init__(self, emit_event: Callable[[dict[str, Any]], Awaitable[None]]):
+    def __init__(
+        self,
+        emit_event: Callable[[dict[str, Any]], Awaitable[None]],
+        quiet: bool = False,
+    ):
         self._emit_event = emit_event
         self._last_payload: dict[str, Any] | None = None
+        self._quiet = quiet
 
     async def emit(
         self,
@@ -1905,6 +1933,9 @@ class StatusEmitter:
         force: bool = False,
         **fields: Any,
     ) -> None:
+        if self._quiet or QUIET_UI.get():
+            return
+
         data: dict[str, Any] = {"description": description, "done": done}
         if hidden is not None:
             data["hidden"] = hidden
@@ -1974,9 +2005,10 @@ class StatusEmitter:
         await self.emit(description, done=True, force=True)
 
     async def notification(self, content: str, *, type: str = "warning") -> None:
-        await self._emit_event(
-            {"type": "notification", "data": {"type": type, "content": content}}
-        )
+        event = {"type": "notification", "data": {"type": type, "content": content}}
+        if _should_drop_event(event, quiet=(self._quiet or QUIET_UI.get())):
+            return
+        await self._emit_event(event)
 # END GENERATED SECTION: anthropic_pipe.response.status_events
 
 # BEGIN GENERATED SECTION: anthropic_pipe.response.text_block
@@ -3628,6 +3660,11 @@ class Pipe:
             default="",
             description="AWS 'Claude on AWS' workspace id. When set, sent as the 'anthropic-workspace-id' "
             "header on every request. Required when ANTHROPIC_BASE_URL points at an aws-external-anthropic endpoint.",
+        )
+        TITO_QUIET_UI: bool = Field(
+            default=True,
+            description="Hide status lines, sources and info notifications when the request model is Tito "
+            "(tito.TITO_MODEL_ID). Errors still show.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -9359,6 +9396,10 @@ class Pipe:
         """
         if __event_emitter__ is None:
             return
+        # Tito quiet UI: status/source/non-error notifications never reach the
+        # frontend. Message and error events are untouched (see status_events).
+        if _should_drop_event(event):
+            return
         try:
             await __event_emitter__(event)
         except Exception as e:
@@ -9439,6 +9480,10 @@ class Pipe:
         # =========================================================================
         # PHASE 1: RESPONSE ACCUMULATION STATE
         # =========================================================================
+        # Tito quiet UI: hide status lines, source chips and info toasts for the
+        # Tito model. Set before StatusEmitter is built so every construction
+        # site sees it; non-Tito requests reset it to False every turn.
+        QUIET_UI.set(self._tito_quiet_ui(__metadata__))
         request_ctx = PipeRequestContext(pipe=self, event_emitter=__event_emitter__)
         final_message = request_ctx.final_message
         emit_event_local = request_ctx.emit_event
@@ -11111,6 +11156,12 @@ class Pipe:
         it, so the gate is the OWUI model id in metadata, never ``body["model"]``.
         """
         return (metadata or {}).get("model", {}).get("id") == "tito"
+
+    def _tito_quiet_ui(self, metadata) -> bool:
+        """True when Tito's quiet UI applies: Tito request AND the valve is on."""
+        return bool(
+            getattr(self.valves, "TITO_QUIET_UI", True) and self._is_tito(metadata)
+        )
 
     def _tito_config(self) -> dict:
         """Return the frozen Tito config (a shallow copy to avoid in-place edits)."""
