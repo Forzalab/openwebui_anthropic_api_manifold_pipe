@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import logging
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,6 +48,7 @@ for _name in (
     "tito_guard_trigger",
     "tito_guard_safety_ok",
     "guard",
+    "guard_verdict",
 ):
     setattr(TITO, _name, getattr(GUARD, _name))
 
@@ -133,7 +136,7 @@ async def test_two_questions_replaced_once_hidden_bytes_kept():
     assert len(client.calls) == 1, client.calls
     call = client.calls[0]
     assert call["model"] == "claude-haiku-5-5", call
-    assert call["temperature"] == 0, call
+    assert "temperature" not in call, call
     assert "Return JSON only" in call["system"], call["system"][-80:]
     assert "[[TITO-KEEP-1]]" in call["messages"][0]["content"], call["messages"]
 
@@ -226,6 +229,147 @@ async def test_non_tito_model_never_runs_guard():
     await FakePipe(guard_valve=False)._tito_output_guard(ctx, client, TITO_META)
     assert client.calls == [], client.calls
     assert ctx.replaces == [], ctx.replaces
+
+
+class PipeLikeCtx:
+    """Mirrors PipeRequestContext accumulation: one list, emit_replace resets it."""
+
+    def __init__(self, content: str) -> None:
+        self.final_message: List[str] = [content]
+        self.events: List[Dict[str, Any]] = []
+
+    def text(self) -> str:
+        return "".join(self.final_message)
+
+    async def emit_event(self, event: Dict[str, Any]) -> None:
+        self.events.append(event)
+
+    async def emit_replace(self, content: str) -> None:
+        await self.emit_event({"type": "replace", "data": {"content": content}})
+        self.final_message.clear()
+        self.final_message.append(content)
+
+
+async def test_final_replace_carries_guarded_text():
+    """Guard replaces, then the orchestrator's final replace (pipe_orchestrator.py:
+    consolidated = final_text(); emit replace) must emit the guarded text last."""
+    content = "Chào anh.\n\nAnh khỏe không? Anh ăn gì chưa?"
+
+    def fix(user_text: str) -> str:
+        return json.dumps(
+            {"ok": False, "edited": user_text.replace("Chào anh.", "Chào anh ạ.")},
+            ensure_ascii=False,
+        )
+
+    ctx = PipeLikeCtx(content)
+    await FakePipe()._tito_output_guard(ctx, FakeClient(fix), TITO_META)
+
+    # Orchestrator tail after the guard.
+    consolidated = ctx.text()
+    if consolidated:
+        await ctx.emit_event({"type": "replace", "data": {"content": consolidated}})
+
+    replaces = [e["data"]["content"] for e in ctx.events if e.get("type") == "replace"]
+    assert len(replaces) == 2, replaces
+    assert "Chào anh ạ." in replaces[0], replaces[0]
+    assert replaces[-1] == replaces[0], (replaces[0], replaces[-1])
+
+
+async def test_guard_never_sends_temperature():
+    """No request kwarg named temperature, on success, on an edit, or on an SDK TypeError."""
+    text = "Tito chào anh. Anh ăn gì chưa? Anh ngủ chưa?"
+    client = FakeClient('{"ok": true}')
+    assert await GUARD.guard(client, text) is None
+    client = FakeClient(
+        lambda t: json.dumps({"ok": False, "edited": t.replace("Anh ngủ chưa?", "Anh ngủ chưa ạ?")})
+    )
+    assert await GUARD.guard(client, text) is not None
+    for call in client.calls:
+        assert "temperature" not in call, call
+
+    # A TypeError from the SDK propagates: no retry branch exists any more.
+    client = FakeClient(error=TypeError("unexpected keyword argument 'temperature'"))
+    try:
+        await GUARD.guard(client, text)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("TypeError was swallowed")
+    assert len(client.calls) == 1, client.calls
+    assert "temperature" not in client.calls[0], client.calls[0]
+
+
+class _Capture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: List[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+async def _run_guard_logged(ctx, client, meta=TITO_META):
+    logger = logging.getLogger("_tito")
+    handler = _Capture()
+    old_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        await FakePipe()._tito_output_guard(ctx, client, meta)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+    return [r for r in handler.records if r.name == "_tito"]
+
+
+async def test_outcome_line_once_per_run_without_reply_text():
+    content = "Chào anh.\n\nAnh khỏe không? Anh ăn gì chưa?"
+
+    def fix(user_text: str) -> str:
+        return json.dumps(
+            {"ok": False, "edited": user_text.replace("Chào anh.", "Chào anh ạ.")},
+            ensure_ascii=False,
+        )
+
+    records = await _run_guard_logged(FakeCtx(content), FakeClient(fix))
+    infos = [r for r in records if r.levelno == logging.INFO]
+    assert len(infos) == 1, [r.getMessage() for r in records]
+    msg = infos[0].getMessage()
+    assert msg.startswith("[TITO] output guard outcome=replaced "), msg
+    assert "trigger=multiple_questions" in msg, msg
+    assert "Chào" not in msg and "Anh" not in msg, msg
+    assert not [r for r in records if r.levelno >= logging.ERROR], records
+
+
+async def test_outcome_labels():
+    content = "Tito mua 2 kg gạo giúp anh nhé. Anh ăn gì chưa? Anh ngủ chưa?"
+    cases = [
+        (FakeClient('{"ok": true}'), "kept_ok"),
+        (FakeClient("không phải JSON"), "kept_parse"),
+        (
+            FakeClient(lambda t: json.dumps({"ok": False, "edited": t.replace("2 kg", "ít")})),
+            "kept_safety",
+        ),
+    ]
+    for client, expected in cases:
+        records = await _run_guard_logged(FakeCtx(content), client)
+        infos = [r.getMessage() for r in records if r.levelno == logging.INFO]
+        assert len(infos) == 1, infos
+        assert infos[0].startswith(f"[TITO] output guard outcome={expected} "), infos
+
+
+async def test_error_logs_tito_err_line():
+    content = "Tito chào anh. Anh ăn gì chưa? Anh ngủ chưa?"
+    client = FakeClient(error=RuntimeError("boom sk-abcdefghijklmnop"))
+    records = await _run_guard_logged(FakeCtx(content), client)
+
+    infos = [r.getMessage() for r in records if r.levelno == logging.INFO]
+    assert len(infos) == 1 and infos[0].startswith("[TITO] output guard outcome=error "), infos
+    errs = [r.getMessage() for r in records if r.levelno == logging.ERROR]
+    assert len(errs) == 1, errs
+    assert re.fullmatch(
+        r"TITO-ERR T\d{4}-[0-9a-f]{4} output_guard RuntimeError: boom \[redacted\]", errs[0]
+    ), errs[0]
 
 
 async def main():

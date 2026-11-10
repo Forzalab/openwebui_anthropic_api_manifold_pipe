@@ -83,47 +83,61 @@ class PipeTitoMethods:
         Only visible prose is sent; ``<details>`` blocks, ``[anthropic-hidden-]``
         carriers and ``[](anthropic:)`` markers are re-inserted byte-for-byte.
         Never raises: any failure leaves the streamed reply exactly as it is.
-        """
-        try:
-            if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
-                return
-            if not self._is_tito(metadata):
-                return
 
-            content = request_ctx.text()
-            if not content or not content.strip():
-                return
+        Logs exactly one INFO line per Tito run (lengths only, never reply text):
+        ``outcome`` is clean | kept_ok | kept_parse | kept_safety | kept_markers |
+        replaced | error. On error a ``TITO-ERR`` line with a support id follows.
+        """
+        if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
+            return
+        if not self._is_tito(metadata):
+            return
+
+        outcome = "error"
+        trigger = "none"
+        content = ""
+        visible = ""
+        rebuilt_len = 0
+        try:
+            content = request_ctx.text() or ""
             segments = split_visible(content)
             visible = visible_text(segments)
-            if not visible.strip():
-                return
+            found = tito_guard_trigger(visible) if visible.strip() else None
+            if not found:
+                outcome = "clean"
+            else:
+                trigger = found
+                request_text, _sentinels = tito_guard_layout(segments)
+                verdict, edited = await guard_verdict(client, request_text)
+                outcome = verdict
+                if verdict == "replace":
+                    rebuilt = tito_guard_rebuild(segments, edited)
+                    if rebuilt is None:
+                        outcome = "kept_markers"
+                    elif rebuilt == content:
+                        outcome = "kept_ok"
+                    else:
+                        await request_ctx.emit_replace(rebuilt)
+                        rebuilt_len = len(rebuilt)
+                        outcome = "replaced"
+        except Exception as exc:
+            outcome = "error"
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 
-            trigger = tito_guard_trigger(visible)
-            if not trigger:
-                logger.debug("[TITO] output guard: clean, Haiku skipped")
-                return
-            logger.info("[TITO] output guard trigger=%s", trigger)
-
-            request_text, _sentinels = tito_guard_layout(segments)
-            edited = await guard(client, request_text)
-            if edited is None:
-                return
-            rebuilt = tito_guard_rebuild(segments, edited)
-            if rebuilt is None:
-                logger.warning(
-                    "[TITO] output guard: hidden-part markers missing, keeping original"
-                )
-                return
-            if rebuilt == content:
-                return
-            await request_ctx.emit_replace(rebuilt)
-            logger.info(
-                "[TITO] output guard replaced reply (%d -> %d chars)",
-                len(content),
-                len(rebuilt),
+            now = _dt.now(_tz.utc)
+            local = now + _td(hours=self._tito_pacific_utc_offset(now))
+            err_id = f"T{local:%H%M}-{os.urandom(2).hex()}"
+            logger.error(
+                "TITO-ERR %s output_guard %s", err_id, self._tito_safe_err(exc, limit=200)
             )
-        except Exception as e:
-            logger.warning("[TITO] output guard skipped (keeping original): %s", e)
+        logger.info(
+            "[TITO] output guard outcome=%s trigger=%s chars=%d visible=%d rebuilt=%d",
+            outcome,
+            trigger,
+            len(content),
+            len(visible),
+            rebuilt_len,
+        )
 
     def _tito_config(self) -> dict:
         """Return the frozen Tito config (a shallow copy to avoid in-place edits)."""

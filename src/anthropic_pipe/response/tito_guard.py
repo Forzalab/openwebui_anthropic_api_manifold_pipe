@@ -229,46 +229,41 @@ def _guard_response_text(response) -> str:
     return "".join(parts)
 
 
+async def guard_verdict(client, visible_text: str) -> tuple:
+    """One Haiku call. Returns ``(outcome, edited)``.
+
+    ``outcome`` is ``"kept_ok"`` (nothing breaks), ``"kept_parse"`` (no usable
+    JSON answer), ``"kept_safety"`` (the edit lost a number, URL or digit token)
+    or ``"replace"`` with the edited text. Client exceptions propagate.
+    No ``temperature`` is sent: current models reject it.
+    """
+    if not visible_text or not visible_text.strip():
+        return ("kept_ok", None)
+
+    response = await client.messages.create(
+        model=TITO_GUARD_MODEL,
+        max_tokens=min(8192, max(256, len(visible_text) * 2)),
+        system=TITO_GUARD_RULES,
+        messages=[{"role": "user", "content": visible_text}],
+    )
+
+    data = _parse_guard_json(_guard_response_text(response))
+    if data is None:
+        return ("kept_parse", None)
+    if data.get("ok") is not False:
+        return ("kept_ok", None)
+    edited = data.get("edited")
+    if not isinstance(edited, str) or not edited.strip():
+        return ("kept_parse", None)
+    if not tito_guard_safety_ok(visible_text, edited):
+        return ("kept_safety", None)
+    return ("replace", edited)
+
+
 async def guard(client, visible_text: str):
     """One Haiku call. Returns the edited text, or None to keep the original.
 
-    Raises only when the client fails in a way that is not about the
-    ``temperature`` parameter; the caller treats every failure as "keep".
+    Raises when the client fails; the caller treats every failure as "keep".
     """
-    if not visible_text or not visible_text.strip():
-        return None
-
-    kwargs = {
-        "model": TITO_GUARD_MODEL,
-        "max_tokens": min(8192, max(256, len(visible_text) * 2)),
-        "temperature": 0,
-        "system": TITO_GUARD_RULES,
-        "messages": [{"role": "user", "content": visible_text}],
-    }
-    try:
-        response = await client.messages.create(**kwargs)
-    except TypeError:
-        # SDK 2.x dropped `temperature` from the typed signatures of the
-        # current models; a guard must never die on a request parameter.
-        logger.warning("[TITO] output guard: temperature rejected by SDK, retrying without it")
-        kwargs.pop("temperature", None)
-        response = await client.messages.create(**kwargs)
-    except Exception as exc:
-        if "temperature" not in str(exc).lower():
-            raise
-        logger.warning("[TITO] output guard: temperature rejected by API, retrying without it")
-        kwargs.pop("temperature", None)
-        response = await client.messages.create(**kwargs)
-
-    data = _parse_guard_json(_guard_response_text(response))
-    if not data or data.get("ok") is not False:
-        return None
-    edited = data.get("edited")
-    if not isinstance(edited, str) or not edited.strip():
-        return None
-    if not tito_guard_safety_ok(visible_text, edited):
-        logger.warning(
-            "[TITO] output guard: rejected an edit that lost a number, URL or digit token"
-        )
-        return None
-    return edited
+    outcome, edited = await guard_verdict(client, visible_text)
+    return edited if outcome == "replace" else None

@@ -2818,43 +2818,32 @@ def _guard_response_text(response) -> str:
             parts.append(getattr(block, "text", "") or "")
     return "".join(parts)
 
-async def guard(client, visible_text: str):
+async def guard_verdict(client, visible_text: str) -> tuple:
     if not visible_text or not visible_text.strip():
-        return None
+        return ("kept_ok", None)
 
-    kwargs = {
-        "model": TITO_GUARD_MODEL,
-        "max_tokens": min(8192, max(256, len(visible_text) * 2)),
-        "temperature": 0,
-        "system": TITO_GUARD_RULES,
-        "messages": [{"role": "user", "content": visible_text}],
-    }
-    try:
-        response = await client.messages.create(**kwargs)
-    except TypeError:
-
-        logger.warning("[TITO] output guard: temperature rejected by SDK, retrying without it")
-        kwargs.pop("temperature", None)
-        response = await client.messages.create(**kwargs)
-    except Exception as exc:
-        if "temperature" not in str(exc).lower():
-            raise
-        logger.warning("[TITO] output guard: temperature rejected by API, retrying without it")
-        kwargs.pop("temperature", None)
-        response = await client.messages.create(**kwargs)
+    response = await client.messages.create(
+        model=TITO_GUARD_MODEL,
+        max_tokens=min(8192, max(256, len(visible_text) * 2)),
+        system=TITO_GUARD_RULES,
+        messages=[{"role": "user", "content": visible_text}],
+    )
 
     data = _parse_guard_json(_guard_response_text(response))
-    if not data or data.get("ok") is not False:
-        return None
+    if data is None:
+        return ("kept_parse", None)
+    if data.get("ok") is not False:
+        return ("kept_ok", None)
     edited = data.get("edited")
     if not isinstance(edited, str) or not edited.strip():
-        return None
+        return ("kept_parse", None)
     if not tito_guard_safety_ok(visible_text, edited):
-        logger.warning(
-            "[TITO] output guard: rejected an edit that lost a number, URL or digit token"
-        )
-        return None
-    return edited
+        return ("kept_safety", None)
+    return ("replace", edited)
+
+async def guard(client, visible_text: str):
+    outcome, edited = await guard_verdict(client, visible_text)
+    return edited if outcome == "replace" else None
 
 class ModelPricing:
 
@@ -9212,46 +9201,56 @@ class Pipe:
         )
 
     async def _tito_output_guard(self, request_ctx, client, metadata) -> None:
-        try:
-            if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
-                return
-            if not self._is_tito(metadata):
-                return
+        if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
+            return
+        if not self._is_tito(metadata):
+            return
 
-            content = request_ctx.text()
-            if not content or not content.strip():
-                return
+        outcome = "error"
+        trigger = "none"
+        content = ""
+        visible = ""
+        rebuilt_len = 0
+        try:
+            content = request_ctx.text() or ""
             segments = split_visible(content)
             visible = visible_text(segments)
-            if not visible.strip():
-                return
+            found = tito_guard_trigger(visible) if visible.strip() else None
+            if not found:
+                outcome = "clean"
+            else:
+                trigger = found
+                request_text, _sentinels = tito_guard_layout(segments)
+                verdict, edited = await guard_verdict(client, request_text)
+                outcome = verdict
+                if verdict == "replace":
+                    rebuilt = tito_guard_rebuild(segments, edited)
+                    if rebuilt is None:
+                        outcome = "kept_markers"
+                    elif rebuilt == content:
+                        outcome = "kept_ok"
+                    else:
+                        await request_ctx.emit_replace(rebuilt)
+                        rebuilt_len = len(rebuilt)
+                        outcome = "replaced"
+        except Exception as exc:
+            outcome = "error"
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 
-            trigger = tito_guard_trigger(visible)
-            if not trigger:
-                logger.debug("[TITO] output guard: clean, Haiku skipped")
-                return
-            logger.info("[TITO] output guard trigger=%s", trigger)
-
-            request_text, _sentinels = tito_guard_layout(segments)
-            edited = await guard(client, request_text)
-            if edited is None:
-                return
-            rebuilt = tito_guard_rebuild(segments, edited)
-            if rebuilt is None:
-                logger.warning(
-                    "[TITO] output guard: hidden-part markers missing, keeping original"
-                )
-                return
-            if rebuilt == content:
-                return
-            await request_ctx.emit_replace(rebuilt)
-            logger.info(
-                "[TITO] output guard replaced reply (%d -> %d chars)",
-                len(content),
-                len(rebuilt),
+            now = _dt.now(_tz.utc)
+            local = now + _td(hours=self._tito_pacific_utc_offset(now))
+            err_id = f"T{local:%H%M}-{os.urandom(2).hex()}"
+            logger.error(
+                "TITO-ERR %s output_guard %s", err_id, self._tito_safe_err(exc, limit=200)
             )
-        except Exception as e:
-            logger.warning("[TITO] output guard skipped (keeping original): %s", e)
+        logger.info(
+            "[TITO] output guard outcome=%s trigger=%s chars=%d visible=%d rebuilt=%d",
+            outcome,
+            trigger,
+            len(content),
+            len(visible),
+            rebuilt_len,
+        )
 
     def _tito_config(self) -> dict:
         return dict(self.TITO_CONFIG)
