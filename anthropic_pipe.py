@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.0
+version: 0.11.1
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.1
+- Tito output guard (valve `TITO_OUTPUT_GUARD`, default on): after a Tito reply finishes, a cheap local pre-check looks for rule breaks (no final question, more than one question, "tôi", long dashes, tool/AI/sleep wording, a paragraph over three sentences). Only then is `claude-haiku-5-5` asked for the smallest fix. An edit that loses a number, URL or digit-bearing token is rejected. On an accepted edit the message is replaced once, keeping every `<details>` block, `[anthropic-hidden-...]` carrier and metadata marker byte-for-byte. Any error leaves the streamed reply untouched; non-Tito models never reach it.
+
 v0.11.0
 - Tito model (OWUI model id `tito`): fixed config (effort medium, adaptive thinking, Opus-5-5 advisor, web_search Fresno/10 uses, tool search off), a frozen tools array loaded from `TITO_TOOLS_FILE`, a Pacific-month budget gate (`TITO_HARD_CAP_USD` 22 / `TITO_SOFT_CAP_USD` 15, fail-open) and Vietnamese-only error mapping. Gated entirely on `__metadata__["model"]["id"] == "tito"`; every other model is byte-for-byte unchanged.
 
@@ -3152,6 +3155,241 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
             await ctx.emit_block(standalone)
 # END GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 
+# BEGIN GENERATED SECTION: anthropic_pipe.response.tito_guard
+TITO_GUARD_MODEL = "claude-haiku-5-5"
+
+TITO_GUARD_RULES = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
+
+1. Exactly ONE question, as the very last sentence, ending with "?". Remove or turn other questions into statements. If there is no question, add ONE short warm question that fits the reply.
+2. Tito calls himself "Tito", never "tôi"/"em"/"con". Dad = "anh" / "anh Đính". Mom = "chị Ngân". Son = "thằng Tùng". Never "Tony", never "ông" for Dad.
+3. No talk about tools, data, systems, records, AI, or "bịa/nói bậy". If the reply says it cannot look something up, replace that with a light friend line ("trí nhớ Tito dạo này như cá vàng").
+4. No offer of things Tito can't do: calendar entries, ringing reminders, phone calls. Replace with "để Tito ghi ra cho anh nhớ nha".
+5. No telling him to sleep, rest, stop, or "để mai" unless he said he is tired.
+6. No flattery opener about his question ("câu hỏi hay", "đúng ý").
+7. No lecture or moralizing sentence; keep facts.
+8. Paragraphs: 1 to 3 short sentences, blank line between. No long dashes (— –); use commas or periods.
+9. Do not quote poems.
+
+If the text contains a marker like [[TITO-KEEP-1]], keep every marker exactly where it is, exactly once, and do not change it.
+Return JSON only: {"ok": true} if nothing breaks, else {"ok": false, "edited": "<the full fixed text>"}."""
+
+# Invisible parts of the persisted message. Matched spans are never sent to
+# Haiku and are re-inserted from the original string, so they cannot drift.
+_HIDDEN_PATTERNS = (
+    # Any collapsible: tool calls, reasoning, code interpreter, cache trace,
+    # cache diagnostics, compaction.
+    re.compile(r"\n?<details\b[^>]*>.*?</details>\n?", re.DOTALL),
+    # Invisible markdown link-reference carriers (encrypted server-tool blocks).
+    re.compile(r"^[ ]{0,3}\[anthropic-hidden[^\]]*\]:[^\n]*(?:\n|$)", re.MULTILINE),
+    # Inline metadata markers (file anchors, container id, cache-diagnostics id).
+    re.compile(r"[ ]?\[\]\(anthropic:[^)]*\)[ ]?"),
+)
+
+# Marker the model must keep in place between prose fragments. It is checked
+# before the edit is accepted, so a dropped or altered marker rejects the edit.
+_TITO_GUARD_SENTINEL = "\n\n[[TITO-KEEP-{n}]]\n\n"
+
+# Local pre-check: these are the cheap signals that a rule may be broken.
+_FORBIDDEN_WORDS_RE = re.compile(
+    r"công cụ|dữ liệu|hệ thống|bịa|nói bậy|trí tuệ nhân tạo|đi ngủ|để mai",
+    re.IGNORECASE,
+)
+# "AI" is only the acronym: a case-insensitive match would hit the everyday
+# Vietnamese word "ai" (who) in almost every reply.
+_AI_ACRONYM_RE = re.compile(r"\bAI\b")
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
+
+_NUMBER_RE = re.compile(r"\d+(?:[.,:/-]\d+)*")
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_DIGIT_TOKEN_RE = re.compile(r"\S*\d\S*")
+
+
+def _hidden_spans(content: str) -> list:
+    spans = []
+    for pattern in _HIDDEN_PATTERNS:
+        spans.extend((match.start(), match.end()) for match in pattern.finditer(content))
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def split_visible(content: str) -> list:
+    if not content:
+        return []
+    segments = []
+    cursor = 0
+    for start, end in _hidden_spans(content):
+        if start > cursor:
+            segments.append((True, content[cursor:start]))
+        segments.append((False, content[start:end]))
+        cursor = end
+    if cursor < len(content):
+        segments.append((True, content[cursor:]))
+    return segments
+
+
+def visible_text(segments: list) -> str:
+    return "".join(text for is_visible, text in segments if is_visible)
+
+
+def tito_guard_layout(segments: list) -> tuple:
+    visible = [text for is_visible, text in segments if is_visible]
+    if not visible:
+        return "", []
+    sentinels = [
+        _TITO_GUARD_SENTINEL.format(n=index)
+        for index in range(1, len(visible))
+    ]
+    parts = [visible[0]]
+    for sentinel, text in zip(sentinels, visible[1:]):
+        parts.append(sentinel)
+        parts.append(text)
+    return "".join(parts), sentinels
+
+
+def tito_guard_rebuild(segments: list, edited: str) -> "str | None":
+    expected = sum(1 for is_visible, _ in segments if is_visible)
+    if not expected:
+        return None
+    sentinels = [
+        _TITO_GUARD_SENTINEL.format(n=index) for index in range(1, expected)
+    ]
+    edited_visible = []
+    rest = edited
+    for sentinel in sentinels:
+        if rest.count(sentinel) != 1:
+            return None
+        head, _, rest = rest.partition(sentinel)
+        edited_visible.append(head)
+    edited_visible.append(rest)
+    if len(edited_visible) != expected:
+        return None
+
+    parts = []
+    visible_index = 0
+    for is_visible, text in segments:
+        if is_visible:
+            parts.append(edited_visible[visible_index])
+            visible_index += 1
+        else:
+            parts.append(text)
+    return "".join(parts)
+
+
+def tito_guard_trigger(text: str) -> "str | None":
+    if not text or not text.strip():
+        return None
+    stripped = text.rstrip(" *\t\r\n")
+    if not stripped.endswith("?"):
+        return "no_final_question"
+    if text.count("?") > 1:
+        return "multiple_questions"
+    if re.search(r"\btôi\b", text, re.IGNORECASE):
+        return "first_person"
+    if "\u2014" in text or "\u2013" in text:
+        return "long_dash"
+    if _FORBIDDEN_WORDS_RE.search(text) or _AI_ACRONYM_RE.search(text):
+        return "forbidden_word"
+    for paragraph in re.split(r"\n\s*\n", text):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        if len(_SENTENCE_END_RE.split(paragraph)) > 3:
+            return "long_paragraph"
+    return None
+
+
+def _safety_tokens(original: str) -> set:
+    tokens = set(_NUMBER_RE.findall(original))
+    tokens.update(
+        url.rstrip(".,;:!?)]}'\"") for url in _URL_RE.findall(original)
+    )
+    for token in _DIGIT_TOKEN_RE.findall(original):
+        tokens.add(token.strip(".,;:!?)]}'\"("))
+    return {token for token in tokens if token}
+
+
+def tito_guard_safety_ok(original: str, edited: str) -> bool:
+    return all(token in edited for token in _safety_tokens(original))
+
+
+def _parse_guard_json(text: str):
+    candidate = (text or "").strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```[A-Za-z]*\s*", "", candidate)
+        candidate = re.sub(r"\s*```$", "", candidate)
+    try:
+        data = json.loads(candidate)
+        return data if isinstance(data, dict) else None
+    except (TypeError, ValueError):
+        pass
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(candidate[start : end + 1])
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _guard_response_text(response) -> str:
+    parts = []
+    for block in getattr(response, "content", None) or []:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                parts.append(block.get("text", "") or "")
+        elif getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", "") or "")
+    return "".join(parts)
+
+
+async def guard(client, visible_text: str):
+    if not visible_text or not visible_text.strip():
+        return None
+
+    kwargs = {
+        "model": TITO_GUARD_MODEL,
+        "max_tokens": min(8192, max(256, len(visible_text) * 2)),
+        "temperature": 0,
+        "system": TITO_GUARD_RULES,
+        "messages": [{"role": "user", "content": visible_text}],
+    }
+    try:
+        response = await client.messages.create(**kwargs)
+    except TypeError:
+        # SDK 2.x dropped `temperature` from the typed signatures of the
+        # current models; a guard must never die on a request parameter.
+        logger.warning("[TITO] output guard: temperature rejected by SDK, retrying without it")
+        kwargs.pop("temperature", None)
+        response = await client.messages.create(**kwargs)
+    except Exception as exc:
+        if "temperature" not in str(exc).lower():
+            raise
+        logger.warning("[TITO] output guard: temperature rejected by API, retrying without it")
+        kwargs.pop("temperature", None)
+        response = await client.messages.create(**kwargs)
+
+    data = _parse_guard_json(_guard_response_text(response))
+    if not data or data.get("ok") is not False:
+        return None
+    edited = data.get("edited")
+    if not isinstance(edited, str) or not edited.strip():
+        return None
+    if not tito_guard_safety_ok(visible_text, edited):
+        logger.warning(
+            "[TITO] output guard: rejected an edit that lost a number, URL or digit token"
+        )
+        return None
+    return edited
+# END GENERATED SECTION: anthropic_pipe.response.tito_guard
+
 # BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
 class ModelPricing:
     # Rate card in USD per million tokens, keyed by base (suffix-stripped) id.
@@ -3665,6 +3903,13 @@ class Pipe:
             default=True,
             description="Hide status lines, sources and info notifications when the request model is Tito "
             "(tito.TITO_MODEL_ID). Errors still show.",
+        )
+        TITO_OUTPUT_GUARD: bool = Field(
+            default=True,
+            description="After a Tito reply finishes, one Haiku check looks for rule breaks in the visible text "
+            "(one final question, no 'tôi', no long dashes, short paragraphs, no tool/AI talk) and replaces the "
+            "message once with a minimal fix. Hidden blocks and metadata markers are kept byte-for-byte. "
+            "Errors never affect the reply.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -10992,6 +11237,19 @@ class Pipe:
                 final_message.append(marker_text)
                 logger.debug("Persisted %d metadata marker char(s)", len(marker_text))
 
+        # Tito output guard: the reply is final (the tool loop is done) and the
+        # accumulated message is what OpenWebUI will save. One Haiku check of
+        # the visible prose; on an accepted edit emit_replace resets the
+        # accumulation, so the authoritative replace below and the returned text
+        # both carry the edited version. Never blocks or fails the reply.
+        if not is_internal:
+            try:
+                await self._tito_output_guard(request_ctx, client, __metadata__)
+            except Exception as _guard_err:
+                logger.warning(
+                    "[TITO] output guard failed (keeping reply): %s", _guard_err
+                )
+
         consolidated = final_text()
         # The authoritative content this run hands to OpenWebUI. Comparing the
         # block count here against what ends up persisted in the DB separates a
@@ -11162,6 +11420,54 @@ class Pipe:
         return bool(
             getattr(self.valves, "TITO_QUIET_UI", True) and self._is_tito(metadata)
         )
+
+    async def _tito_output_guard(self, request_ctx, client, metadata) -> None:
+        """Check Tito's visible reply with Haiku and replace it once if needed.
+
+        Only visible prose is sent; ``<details>`` blocks, ``[anthropic-hidden-]``
+        carriers and ``[](anthropic:)`` markers are re-inserted byte-for-byte.
+        Never raises: any failure leaves the streamed reply exactly as it is.
+        """
+        try:
+            if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
+                return
+            if not self._is_tito(metadata):
+                return
+
+            content = request_ctx.text()
+            if not content or not content.strip():
+                return
+            segments = split_visible(content)
+            visible = visible_text(segments)
+            if not visible.strip():
+                return
+
+            trigger = tito_guard_trigger(visible)
+            if not trigger:
+                logger.debug("[TITO] output guard: clean, Haiku skipped")
+                return
+            logger.info("[TITO] output guard trigger=%s", trigger)
+
+            request_text, _sentinels = tito_guard_layout(segments)
+            edited = await guard(client, request_text)
+            if edited is None:
+                return
+            rebuilt = tito_guard_rebuild(segments, edited)
+            if rebuilt is None:
+                logger.warning(
+                    "[TITO] output guard: hidden-part markers missing, keeping original"
+                )
+                return
+            if rebuilt == content:
+                return
+            await request_ctx.emit_replace(rebuilt)
+            logger.info(
+                "[TITO] output guard replaced reply (%d -> %d chars)",
+                len(content),
+                len(rebuilt),
+            )
+        except Exception as e:
+            logger.warning("[TITO] output guard skipped (keeping original): %s", e)
 
     def _tito_config(self) -> dict:
         """Return the frozen Tito config (a shallow copy to avoid in-place edits)."""

@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.0
+version: 0.11.1
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.1
+- Tito output guard (valve `TITO_OUTPUT_GUARD`, default on): after a Tito reply finishes, a cheap local pre-check looks for rule breaks (no final question, more than one question, "tôi", long dashes, tool/AI/sleep wording, a paragraph over three sentences). Only then is `claude-haiku-5-5` asked for the smallest fix. An edit that loses a number, URL or digit-bearing token is rejected. On an accepted edit the message is replaced once, keeping every `<details>` block, `[anthropic-hidden-...]` carrier and metadata marker byte-for-byte. Any error leaves the streamed reply untouched; non-Tito models never reach it.
+
 v0.11.0
 - Tito model (OWUI model id `tito`): fixed config (effort medium, adaptive thinking, Opus-5-5 advisor, web_search Fresno/10 uses, tool search off), a frozen tools array loaded from `TITO_TOOLS_FILE`, a Pacific-month budget gate (`TITO_HARD_CAP_USD` 22 / `TITO_SOFT_CAP_USD` 15, fail-open) and Vietnamese-only error mapping. Gated entirely on `__metadata__["model"]["id"] == "tito"`; every other model is byte-for-byte unchanged.
 
@@ -750,6 +753,9 @@ class PipeRequestContext:
 # BEGIN GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 # END GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 
+# BEGIN GENERATED SECTION: anthropic_pipe.response.tito_guard
+# END GENERATED SECTION: anthropic_pipe.response.tito_guard
+
 # BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
 # END GENERATED SECTION: anthropic_pipe.shared.pricing
 
@@ -1013,6 +1019,13 @@ class Pipe:
             default=True,
             description="Hide status lines, sources and info notifications when the request model is Tito "
             "(tito.TITO_MODEL_ID). Errors still show.",
+        )
+        TITO_OUTPUT_GUARD: bool = Field(
+            default=True,
+            description="After a Tito reply finishes, one Haiku check looks for rule breaks in the visible text "
+            "(one final question, no 'tôi', no long dashes, short paragraphs, no tool/AI talk) and replaces the "
+            "message once with a minimal fix. Hidden blocks and metadata markers are kept byte-for-byte. "
+            "Errors never affect the reply.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,

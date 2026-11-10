@@ -1538,6 +1538,19 @@ class PipeOrchestratorMethods:
                 final_message.append(marker_text)
                 logger.debug("Persisted %d metadata marker char(s)", len(marker_text))
 
+        # Tito output guard: the reply is final (the tool loop is done) and the
+        # accumulated message is what OpenWebUI will save. One Haiku check of
+        # the visible prose; on an accepted edit emit_replace resets the
+        # accumulation, so the authoritative replace below and the returned text
+        # both carry the edited version. Never blocks or fails the reply.
+        if not is_internal:
+            try:
+                await self._tito_output_guard(request_ctx, client, __metadata__)
+            except Exception as _guard_err:
+                logger.warning(
+                    "[TITO] output guard failed (keeping reply): %s", _guard_err
+                )
+
         consolidated = final_text()
         # The authoritative content this run hands to OpenWebUI. Comparing the
         # block count here against what ends up persisted in the DB separates a

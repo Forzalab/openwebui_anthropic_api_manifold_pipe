@@ -77,6 +77,54 @@ class PipeTitoMethods:
             getattr(self.valves, "TITO_QUIET_UI", True) and self._is_tito(metadata)
         )
 
+    async def _tito_output_guard(self, request_ctx, client, metadata) -> None:
+        """Check Tito's visible reply with Haiku and replace it once if needed.
+
+        Only visible prose is sent; ``<details>`` blocks, ``[anthropic-hidden-]``
+        carriers and ``[](anthropic:)`` markers are re-inserted byte-for-byte.
+        Never raises: any failure leaves the streamed reply exactly as it is.
+        """
+        try:
+            if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
+                return
+            if not self._is_tito(metadata):
+                return
+
+            content = request_ctx.text()
+            if not content or not content.strip():
+                return
+            segments = split_visible(content)
+            visible = visible_text(segments)
+            if not visible.strip():
+                return
+
+            trigger = tito_guard_trigger(visible)
+            if not trigger:
+                logger.debug("[TITO] output guard: clean, Haiku skipped")
+                return
+            logger.info("[TITO] output guard trigger=%s", trigger)
+
+            request_text, _sentinels = tito_guard_layout(segments)
+            edited = await guard(client, request_text)
+            if edited is None:
+                return
+            rebuilt = tito_guard_rebuild(segments, edited)
+            if rebuilt is None:
+                logger.warning(
+                    "[TITO] output guard: hidden-part markers missing, keeping original"
+                )
+                return
+            if rebuilt == content:
+                return
+            await request_ctx.emit_replace(rebuilt)
+            logger.info(
+                "[TITO] output guard replaced reply (%d -> %d chars)",
+                len(content),
+                len(rebuilt),
+            )
+        except Exception as e:
+            logger.warning("[TITO] output guard skipped (keeping original): %s", e)
+
     def _tito_config(self) -> dict:
         """Return the frozen Tito config (a shallow copy to avoid in-place edits)."""
         return dict(self.TITO_CONFIG)
