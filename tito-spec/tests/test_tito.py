@@ -465,7 +465,7 @@ def _run_review_fix_checks():
 
     # ---- N1: system split ----
     H = T.TITO_SNAPSHOT_HEADING
-    record("N1 heading literal", H == "NHỮNG ĐIỀU TITO NHỚ VỀ ÔNG", repr(H))
+    record("N1 heading literal", H == "NHỮNG ĐIỀU TITO NHỚ VỀ ANH", repr(H))
     one = [{"type": "text", "text": "persona text\n\n" + H + "\n- fact"}]
     out = T._tito_split_system(one)
     record("N1 single string split into 2 blocks",

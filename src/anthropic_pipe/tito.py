@@ -54,7 +54,7 @@ class PipeTitoMethods:
     }
 
     # Copied (not imported) from open-webui backend/open_webui/utils/tito.py.
-    TITO_SNAPSHOT_HEADING = "NHỮNG ĐIỀU TITO NHỚ VỀ ÔNG"
+    TITO_SNAPSHOT_HEADING = "NHỮNG ĐIỀU TITO NHỚ VỀ ANH"
     _TITO_ALERT_MAX = 500
     _tito_tools_alerted = False  # once per process
 
