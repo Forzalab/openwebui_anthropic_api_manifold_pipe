@@ -92,6 +92,9 @@ class PipeTitoMethods:
             return
         if not self._is_tito(metadata):
             return
+        timing = getattr(request_ctx, "timing", None)
+        if timing is not None:
+            timing["guard_t0"] = time.monotonic()
 
         outcome = "error"
         trigger = "none"
@@ -480,6 +483,65 @@ class PipeTitoMethods:
                 f"Tito: tools/system fingerprint changed for chat_id={chat_id}"
             )
         state[chat_id] = (tools_sha, system_sha)
+
+    @staticmethod
+    def _tito_count_images(request_ctx, payload: dict) -> None:
+        """Record image block count and decoded bytes of the outgoing request.
+
+        Numbers only. Base64 size is computed from the string length, so no
+        image is decoded. URL-sourced images count as blocks with 0 bytes.
+        """
+        count = 0
+        total = 0
+
+        def walk(blocks) -> None:
+            nonlocal count, total
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image":
+                    count += 1
+                    source = block.get("source") or {}
+                    data = source.get("data") if isinstance(source, dict) else None
+                    if isinstance(data, str):
+                        pad = len(data) - len(data.rstrip("="))
+                        total += len(data) * 3 // 4 - pad
+                elif isinstance(block.get("content"), list):
+                    walk(block["content"])
+
+        for message in (payload or {}).get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), list):
+                walk(message["content"])
+        request_ctx.timing["images"] = count
+        request_ctx.timing["image_bytes"] = total
+
+    def _tito_log_timing(self, request_ctx, usage: dict) -> None:
+        """One INFO line per Tito turn: timings and token counts, no content."""
+        timing = request_ctx.timing
+        t0 = timing.get("t0")
+        if t0 is None:
+            return
+        now = time.monotonic()
+
+        def ms(key: str, end: float = None) -> int:
+            value = timing.get(key)
+            return 0 if value is None else int(round(((end if end is not None else value) - t0) * 1000))
+
+        logger.info(
+            "[TITO] timing ttfb_ms=%d first_text_ms=%d stream_ms=%d guard_ms=%d total_ms=%d "
+            "in=%d out=%d cache_read=%d cache_write=%d images=%d image_bytes=%d",
+            ms("ttfb"),
+            ms("first_text"),
+            int(round(timing.get("stream", 0.0) * 1000)),
+            int(round(timing.get("guard", 0.0) * 1000)),
+            ms("t0", now),
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            timing.get("images", 0),
+            timing.get("image_bytes", 0),
+        )
 
     @staticmethod
     def _tito_usage_stream(text: str, model: str, usage: dict):

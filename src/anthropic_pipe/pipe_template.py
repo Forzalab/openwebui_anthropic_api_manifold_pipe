@@ -643,6 +643,8 @@ class PipeRequestContext:
     # so interleaved runs — retries, concurrent turns, two runs writing into the
     # same OpenWebUI message — can be told apart in the container log.
     run_id: str = field(default_factory=lambda: os.urandom(4).hex())
+    # Tito timing marks (monotonic seconds), read once by _tito_log_timing.
+    timing: dict = field(default_factory=dict)
 
     # Populated by pipe() after auth/tool setup; handlers read them via ctx.
     # `status` is a StatusEmitter, typed loosely because its class is compiled
@@ -661,6 +663,8 @@ class PipeRequestContext:
 
     async def emit_delta(self, content: str) -> None:
         """Emit a streaming content delta and append it to the accumulated message."""
+        if content and "first_text" not in self.timing:
+            self.timing["first_text"] = time.monotonic()
         await self.emit_event({"type": "message", "data": {"content": content}})
         self.final_message.append(content)
 
