@@ -2756,7 +2756,9 @@ def tito_guard_rebuild(segments: list, edited: str) -> "str | None":
             visible_index += 1
         else:
             parts.append(text)
-    return "".join(parts)
+    return _CARRIER_NEEDS_BLANK_RE.sub("\\1\n\n", "".join(parts))
+
+_CARRIER_NEEDS_BLANK_RE = re.compile(r"([^\n])\n?(?=[ ]{0,3}\[anthropic-hidden[^\]]*\]:)")
 
 def tito_guard_trigger(text: str) -> "str | None":
     if not text or not text.strip():

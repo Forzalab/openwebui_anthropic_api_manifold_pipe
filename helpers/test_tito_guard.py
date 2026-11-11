@@ -372,6 +372,21 @@ async def test_error_logs_tito_err_line():
     ), errs[0]
 
 
+async def test_rebuild_keeps_blank_line_before_hidden_carrier():
+    # 2026-11-11 leak: the edit path ate the blank line before a server-tool
+    # carrier, so Conduit showed "[anthropic-hidden-...]: #<base64>" as text.
+    split_visible, tito_guard_layout, tito_guard_rebuild = GUARD.split_visible, GUARD.tito_guard_layout, GUARD.tito_guard_rebuild
+
+    content = "Chờ chút nha.\n\n[anthropic-hidden-srvtoolu_X]: #QUJD\n\nSố là 559.\n\n**Anh gọi không?**"
+    segments = split_visible(content)
+    layout, _ = tito_guard_layout(segments)
+    assert tito_guard_rebuild(segments, layout) == content
+    for squeezed in ("nha.\n\n",):  # model collapses blank lines around the sentinel
+        out = tito_guard_rebuild(segments, layout.replace("nha.\n\n\n\n", squeezed))
+        assert "nha.\n\n[anthropic-hidden-srvtoolu_X]: #QUJD" in out, repr(out)
+        assert "\n\n\n[anthropic" not in out, repr(out)
+
+
 async def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:
