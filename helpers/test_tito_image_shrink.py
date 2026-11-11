@@ -97,7 +97,7 @@ def main() -> int:
     assert blocks[5] == payload["messages"][0]["content"][5], "url image changed"
     nested = out["messages"][1]["content"][0]["content"][0]["source"]
     assert _open(nested["data"]).size == (100, 50)
-    assert len(records) == 1 and "image shrink failed" in records[0], records
+    assert len(records) == 1 and "image_shrink " in records[0] and "TITO-ERR T" in records[0], records
     assert "not an image" not in records[0] and "example" not in records[0]
 
     # Pillow missing: every image is left alone, one WARNING.
@@ -111,7 +111,7 @@ def main() -> int:
             sys.modules["PIL"] = saved
         else:
             sys.modules.pop("PIL", None)
-    assert same is payload and len(records) == 1 and "Pillow unavailable" in records[0], records
+    assert same is payload and len(records) == 1 and "image_shrink " in records[0] and "TITO-ERR T" in records[0], records
     print("ok: tito image shrink")
     return 0
 
