@@ -92,6 +92,9 @@ class PipeTitoMethods:
             return
         if not self._is_tito(metadata):
             return
+        timing = getattr(request_ctx, "timing", None)
+        if timing is not None:
+            timing["guard_t0"] = time.monotonic()
 
         outcome = "error"
         trigger = "none"
@@ -480,3 +483,165 @@ class PipeTitoMethods:
                 f"Tito: tools/system fingerprint changed for chat_id={chat_id}"
             )
         state[chat_id] = (tools_sha, system_sha)
+
+    def _tito_shrink_images(self, payload: dict) -> dict:
+        """Return a payload whose oversized base64 images are downscaled.
+
+        Called only for Tito with ``TITO_IMAGE_MAX_PX`` > 0. Blocks are replaced
+        in new lists and dicts, so the caller's payload is not mutated. An image
+        that cannot be processed is kept as it was; the WARNING names only the
+        exception type.
+        """
+        max_px = int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0)
+        if max_px <= 0:
+            return payload
+        try:
+            import base64
+            import io
+
+            from PIL import Image
+        except Exception as exc:
+            logger.warning("[TITO] image shrink skipped, Pillow unavailable: %s", type(exc).__name__)
+            return payload
+
+        def shrink(block: dict) -> dict:
+            source = block.get("source")
+            if not isinstance(source, dict) or source.get("type") != "base64":
+                return block
+            data = source.get("data")
+            if not isinstance(data, str):
+                return block
+            try:
+                with Image.open(io.BytesIO(base64.b64decode(data))) as im:
+                    width, height = im.size
+                    if max(width, height) <= max_px:
+                        return block
+                    im.load()
+                    has_alpha = im.mode in ("RGBA", "LA") or (
+                        im.mode == "P" and "transparency" in im.info
+                    )
+                    scale = max_px / max(width, height)
+                    resized = im.resize(
+                        (max(1, round(width * scale)), max(1, round(height * scale))),
+                        Image.LANCZOS,
+                    )
+                out = io.BytesIO()
+                if has_alpha:
+                    resized.save(out, format="PNG", optimize=True)
+                    media_type = "image/png"
+                else:
+                    if resized.mode not in ("RGB", "L"):
+                        resized = resized.convert("RGB")
+                    resized.save(out, format="JPEG", quality=85)
+                    media_type = "image/jpeg"
+                new_source = {
+                    **source,
+                    "media_type": media_type,
+                    "data": base64.b64encode(out.getvalue()).decode("ascii"),
+                }
+                return {**block, "source": new_source}
+            except Exception as exc:
+                logger.warning("[TITO] image shrink failed for one image, sent unchanged: %s", type(exc).__name__)
+                return block
+
+        def walk(blocks: list) -> list:
+            result = []
+            for block in blocks:
+                if isinstance(block, dict):
+                    if block.get("type") == "image":
+                        block = shrink(block)
+                    elif isinstance(block.get("content"), list):
+                        block = {**block, "content": walk(block["content"])}
+                result.append(block)
+            return result
+
+        messages = []
+        for message in payload.get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), list):
+                message = {**message, "content": walk(message["content"])}
+            messages.append(message)
+        return {**payload, "messages": messages}
+
+    @staticmethod
+    def _tito_count_images(request_ctx, payload: dict) -> None:
+        """Record image block count and decoded bytes of the outgoing request.
+
+        Numbers only. Base64 size is computed from the string length, so no
+        image is decoded. URL-sourced images count as blocks with 0 bytes.
+        """
+        count = 0
+        total = 0
+
+        def walk(blocks) -> None:
+            nonlocal count, total
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image":
+                    count += 1
+                    source = block.get("source") or {}
+                    data = source.get("data") if isinstance(source, dict) else None
+                    if isinstance(data, str):
+                        pad = len(data) - len(data.rstrip("="))
+                        total += len(data) * 3 // 4 - pad
+                elif isinstance(block.get("content"), list):
+                    walk(block["content"])
+
+        for message in (payload or {}).get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), list):
+                walk(message["content"])
+        request_ctx.timing["images"] = count
+        request_ctx.timing["image_bytes"] = total
+
+    def _tito_log_timing(self, request_ctx, usage: dict) -> None:
+        """One INFO line per Tito turn: timings and token counts, no content."""
+        timing = request_ctx.timing
+        t0 = timing.get("t0")
+        if t0 is None:
+            return
+        now = time.monotonic()
+
+        def ms(key: str, end: float | None = None) -> int:
+            value = timing.get(key)
+            return 0 if value is None else round(((end if end is not None else value) - t0) * 1000)
+
+        logger.info(
+            "[TITO] timing ttfb_ms=%d first_text_ms=%d stream_ms=%d guard_ms=%d total_ms=%d "
+            "in=%d out=%d cache_read=%d cache_write=%d images=%d image_bytes=%d",
+            ms("ttfb"),
+            ms("first_text"),
+            round(timing.get("stream", 0.0) * 1000),
+            round(timing.get("guard", 0.0) * 1000),
+            ms("t0", now),
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            timing.get("images", 0),
+            timing.get("image_bytes", 0),
+        )
+
+    @staticmethod
+    def _tito_usage_stream(text: str, model: str, usage: dict):
+        """Stream a finished Tito reply so OpenWebUI's middleware sees its usage.
+
+        The middleware persists ``message.usage`` from the ``usage`` key of the
+        SSE chunks it reads from the pipe (``utils/middleware.py``, the chunk loop
+        that merges ``data['usage']`` into ``current_usage``). A plain ``str``
+        return carries no usage, so the middleware's final save wrote
+        ``{"incomplete": true}`` over the direct DB write made by the pipe. This
+        yields the same content chunk a ``str`` return would, then one empty-
+        choices chunk carrying the final usage; OpenWebUI appends its own finish
+        chunk after it.
+        """
+
+        async def _chunks():
+            if text:
+                yield {
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                }
+            yield {"object": "chat.completion.chunk", "model": model, "choices": [], "usage": usage}
+
+        return _chunks()

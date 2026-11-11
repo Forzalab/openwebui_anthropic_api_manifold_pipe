@@ -643,6 +643,8 @@ class PipeRequestContext:
     # so interleaved runs — retries, concurrent turns, two runs writing into the
     # same OpenWebUI message — can be told apart in the container log.
     run_id: str = field(default_factory=lambda: os.urandom(4).hex())
+    # Tito timing marks (monotonic seconds), read once by _tito_log_timing.
+    timing: dict = field(default_factory=dict)
 
     # Populated by pipe() after auth/tool setup; handlers read them via ctx.
     # `status` is a StatusEmitter, typed loosely because its class is compiled
@@ -661,6 +663,8 @@ class PipeRequestContext:
 
     async def emit_delta(self, content: str) -> None:
         """Emit a streaming content delta and append it to the accumulated message."""
+        if content and "first_text" not in self.timing:
+            self.timing["first_text"] = time.monotonic()
         await self.emit_event({"type": "message", "data": {"content": content}})
         self.final_message.append(content)
 
@@ -1026,6 +1030,13 @@ class Pipe:
             "(one final question, no 'tôi', no long dashes, short paragraphs, no tool/AI talk) and replaces the "
             "message once with a minimal fix. Hidden blocks and metadata markers are kept byte-for-byte. "
             "Errors never affect the reply.",
+        )
+        TITO_IMAGE_MAX_PX: int = Field(
+            default=0,
+            ge=0,
+            description="Tito only. When > 0, base64 images in the outgoing request whose longest side is larger "
+            "are resized to this many pixels (aspect kept, LANCZOS). JPEG q85 unless the image has transparency. "
+            "0 = off. A failing image is sent unchanged and logged as one WARNING without content.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,

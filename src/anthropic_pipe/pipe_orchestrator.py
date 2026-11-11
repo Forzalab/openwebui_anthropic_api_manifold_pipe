@@ -57,6 +57,7 @@ class PipeOrchestratorMethods:
         # window can be split into invocations without guessing from timestamps —
         # the thing that made the doubled cache-diagnostics block hard to pin down.
         run_id = request_ctx.run_id
+        request_ctx.timing["t0"] = time.monotonic()
         logger.info(
             "[RUN %s] pipe() start chat_id=%s message_id=%s session_id=%s",
             run_id,
@@ -375,6 +376,10 @@ class PipeOrchestratorMethods:
                         is_tool_loop=(tool_loop_iteration > 1),
                         iteration=tool_loop_iteration,
                     )
+                    # Tito image shrink (valve TITO_IMAGE_MAX_PX, default off). Runs on
+                    # every iteration because tool results can add images to the list.
+                    if self.TITO_ACTIVE.get() and int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0) > 0:
+                        payload_for_stream["messages"] = self._tito_shrink_images(payload_for_stream)["messages"]
                     # Tito per-turn fingerprint: one line, warn + Discord on drift.
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
                         self._tito_log_fingerprint(payload_for_stream, __metadata__)
@@ -404,6 +409,9 @@ class PipeOrchestratorMethods:
                     # Fast mode has its own rate limit; fail a fast request
                     # immediately instead of letting the SDK back off, so the
                     # 429 handler below can fall back to standard speed.
+                    if "images" not in request_ctx.timing:
+                        self._tito_count_images(request_ctx, payload_for_stream)
+                    _stream_open = time.monotonic()
                     _stream_client = (
                         client.with_options(max_retries=0)
                         if payload_for_stream.get("speed") == "fast"
@@ -414,6 +422,8 @@ class PipeOrchestratorMethods:
                     ) as stream:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
+                            if "ttfb" not in request_ctx.timing:
+                                request_ctx.timing["ttfb"] = time.monotonic()
                             stream_event_counts[event_type] = stream_event_counts.get(event_type, 0) + 1
                             logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts}")
                             if event_type == "message_start":
@@ -881,6 +891,9 @@ class PipeOrchestratorMethods:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
+                        request_ctx.timing["stream"] = request_ctx.timing.get("stream", 0.0) + (
+                            time.monotonic() - _stream_open
+                        )
                     # Log stream event diagnostics
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
@@ -1550,6 +1563,10 @@ class PipeOrchestratorMethods:
                 logger.warning(
                     "[TITO] output guard failed (keeping reply): %s", _guard_err
                 )
+            finally:
+                _guard_t0 = request_ctx.timing.pop("guard_t0", None)
+                if _guard_t0 is not None:
+                    request_ctx.timing["guard"] = time.monotonic() - _guard_t0
 
         consolidated = final_text()
         # The authoritative content this run hands to OpenWebUI. Comparing the
@@ -1660,5 +1677,20 @@ class PipeOrchestratorMethods:
                 }
             ]
             return completion
+
+        if self.TITO_ACTIVE.get() and not is_internal:
+            self._tito_log_timing(request_ctx, total_usage or {})
+
+        # Tito streams the reply with its usage in the SSE chunks (see
+        # _tito_usage_stream); every other model keeps the plain text return.
+        if (
+            self.TITO_ACTIVE.get()
+            and include_usage
+            and total_usage
+            and body.get("stream", True)
+        ):
+            return self._tito_usage_stream(
+                final_text(), body.get("model", ""), self._public_usage(total_usage)
+            )
 
         return final_text()

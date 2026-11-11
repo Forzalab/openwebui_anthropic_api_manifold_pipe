@@ -534,6 +534,8 @@ class PipeRequestContext:
 
     run_id: str = field(default_factory=lambda: os.urandom(4).hex())
 
+    timing: dict = field(default_factory=dict)
+
     status: Any = None
     user: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -546,6 +548,8 @@ class PipeRequestContext:
         await self.pipe.emit_event(event, self.event_emitter)
 
     async def emit_delta(self, content: str) -> None:
+        if content and "first_text" not in self.timing:
+            self.timing["first_text"] = time.monotonic()
         await self.emit_event({"type": "message", "data": {"content": content}})
         self.final_message.append(content)
 
@@ -3285,6 +3289,13 @@ class Pipe:
             "(one final question, no 'tôi', no long dashes, short paragraphs, no tool/AI talk) and replaces the "
             "message once with a minimal fix. Hidden blocks and metadata markers are kept byte-for-byte. "
             "Errors never affect the reply.",
+        )
+        TITO_IMAGE_MAX_PX: int = Field(
+            default=0,
+            ge=0,
+            description="Tito only. When > 0, base64 images in the outgoing request whose longest side is larger "
+            "are resized to this many pixels (aspect kept, LANCZOS). JPEG q85 unless the image has transparency. "
+            "0 = off. A failing image is sent unchanged and logged as one WARNING without content.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -7870,6 +7881,7 @@ class Pipe:
         is_internal = False
 
         run_id = request_ctx.run_id
+        request_ctx.timing["t0"] = time.monotonic()
         logger.info(
             "[RUN %s] pipe() start chat_id=%s message_id=%s session_id=%s",
             run_id,
@@ -8116,6 +8128,9 @@ class Pipe:
                         iteration=tool_loop_iteration,
                     )
 
+                    if self.TITO_ACTIVE.get() and int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0) > 0:
+                        payload_for_stream["messages"] = self._tito_shrink_images(payload_for_stream)["messages"]
+
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
                         self._tito_log_fingerprint(payload_for_stream, __metadata__)
 
@@ -8139,6 +8154,9 @@ class Pipe:
                         except Exception as _pl_err:
                             logger.debug(f"[PAYLOAD] strip/log failed: {_pl_err}")
 
+                    if "images" not in request_ctx.timing:
+                        self._tito_count_images(request_ctx, payload_for_stream)
+                    _stream_open = time.monotonic()
                     _stream_client = (
                         client.with_options(max_retries=0)
                         if payload_for_stream.get("speed") == "fast"
@@ -8149,6 +8167,8 @@ class Pipe:
                     ) as stream:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
+                            if "ttfb" not in request_ctx.timing:
+                                request_ctx.timing["ttfb"] = time.monotonic()
                             stream_event_counts[event_type] = stream_event_counts.get(event_type, 0) + 1
                             logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts}")
                             if event_type == "message_start":
@@ -8533,6 +8553,9 @@ class Pipe:
                                     text_state.chunk_count = 0
 
                         sdk_final_message = stream.current_message_snapshot
+                        request_ctx.timing["stream"] = request_ctx.timing.get("stream", 0.0) + (
+                            time.monotonic() - _stream_open
+                        )
 
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
@@ -9072,6 +9095,10 @@ class Pipe:
                 logger.warning(
                     "[TITO] output guard failed (keeping reply): %s", _guard_err
                 )
+            finally:
+                _guard_t0 = request_ctx.timing.pop("guard_t0", None)
+                if _guard_t0 is not None:
+                    request_ctx.timing["guard"] = time.monotonic() - _guard_t0
 
         consolidated = final_text()
 
@@ -9150,6 +9177,19 @@ class Pipe:
             ]
             return completion
 
+        if self.TITO_ACTIVE.get() and not is_internal:
+            self._tito_log_timing(request_ctx, total_usage or {})
+
+        if (
+            self.TITO_ACTIVE.get()
+            and include_usage
+            and total_usage
+            and body.get("stream", True)
+        ):
+            return self._tito_usage_stream(
+                final_text(), body.get("model", ""), self._public_usage(total_usage)
+            )
+
         return final_text()
 
     """Everything gated on the OWUI model id ``tito``.
@@ -9205,6 +9245,9 @@ class Pipe:
             return
         if not self._is_tito(metadata):
             return
+        timing = getattr(request_ctx, "timing", None)
+        if timing is not None:
+            timing["guard_t0"] = time.monotonic()
 
         outcome = "error"
         trigger = "none"
@@ -9550,6 +9593,144 @@ class Pipe:
                 f"Tito: tools/system fingerprint changed for chat_id={chat_id}"
             )
         state[chat_id] = (tools_sha, system_sha)
+
+    def _tito_shrink_images(self, payload: dict) -> dict:
+        max_px = int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0)
+        if max_px <= 0:
+            return payload
+        try:
+            import base64
+            import io
+
+            from PIL import Image
+        except Exception as exc:
+            logger.warning("[TITO] image shrink skipped, Pillow unavailable: %s", type(exc).__name__)
+            return payload
+
+        def shrink(block: dict) -> dict:
+            source = block.get("source")
+            if not isinstance(source, dict) or source.get("type") != "base64":
+                return block
+            data = source.get("data")
+            if not isinstance(data, str):
+                return block
+            try:
+                with Image.open(io.BytesIO(base64.b64decode(data))) as im:
+                    width, height = im.size
+                    if max(width, height) <= max_px:
+                        return block
+                    im.load()
+                    has_alpha = im.mode in ("RGBA", "LA") or (
+                        im.mode == "P" and "transparency" in im.info
+                    )
+                    scale = max_px / max(width, height)
+                    resized = im.resize(
+                        (max(1, round(width * scale)), max(1, round(height * scale))),
+                        Image.LANCZOS,
+                    )
+                out = io.BytesIO()
+                if has_alpha:
+                    resized.save(out, format="PNG", optimize=True)
+                    media_type = "image/png"
+                else:
+                    if resized.mode not in ("RGB", "L"):
+                        resized = resized.convert("RGB")
+                    resized.save(out, format="JPEG", quality=85)
+                    media_type = "image/jpeg"
+                new_source = {
+                    **source,
+                    "media_type": media_type,
+                    "data": base64.b64encode(out.getvalue()).decode("ascii"),
+                }
+                return {**block, "source": new_source}
+            except Exception as exc:
+                logger.warning("[TITO] image shrink failed for one image, sent unchanged: %s", type(exc).__name__)
+                return block
+
+        def walk(blocks: list) -> list:
+            result = []
+            for block in blocks:
+                if isinstance(block, dict):
+                    if block.get("type") == "image":
+                        block = shrink(block)
+                    elif isinstance(block.get("content"), list):
+                        block = {**block, "content": walk(block["content"])}
+                result.append(block)
+            return result
+
+        messages = []
+        for message in payload.get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), list):
+                message = {**message, "content": walk(message["content"])}
+            messages.append(message)
+        return {**payload, "messages": messages}
+
+    @staticmethod
+    def _tito_count_images(request_ctx, payload: dict) -> None:
+        count = 0
+        total = 0
+
+        def walk(blocks) -> None:
+            nonlocal count, total
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image":
+                    count += 1
+                    source = block.get("source") or {}
+                    data = source.get("data") if isinstance(source, dict) else None
+                    if isinstance(data, str):
+                        pad = len(data) - len(data.rstrip("="))
+                        total += len(data) * 3 // 4 - pad
+                elif isinstance(block.get("content"), list):
+                    walk(block["content"])
+
+        for message in (payload or {}).get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), list):
+                walk(message["content"])
+        request_ctx.timing["images"] = count
+        request_ctx.timing["image_bytes"] = total
+
+    def _tito_log_timing(self, request_ctx, usage: dict) -> None:
+        timing = request_ctx.timing
+        t0 = timing.get("t0")
+        if t0 is None:
+            return
+        now = time.monotonic()
+
+        def ms(key: str, end: float | None = None) -> int:
+            value = timing.get(key)
+            return 0 if value is None else round(((end if end is not None else value) - t0) * 1000)
+
+        logger.info(
+            "[TITO] timing ttfb_ms=%d first_text_ms=%d stream_ms=%d guard_ms=%d total_ms=%d "
+            "in=%d out=%d cache_read=%d cache_write=%d images=%d image_bytes=%d",
+            ms("ttfb"),
+            ms("first_text"),
+            round(timing.get("stream", 0.0) * 1000),
+            round(timing.get("guard", 0.0) * 1000),
+            ms("t0", now),
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            timing.get("images", 0),
+            timing.get("image_bytes", 0),
+        )
+
+    @staticmethod
+    def _tito_usage_stream(text: str, model: str, usage: dict):
+
+        async def _chunks():
+            if text:
+                yield {
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                }
+            yield {"object": "chat.completion.chunk", "model": model, "choices": [], "usage": usage}
+
+        return _chunks()
 
     async def _create_payload(
         self,
