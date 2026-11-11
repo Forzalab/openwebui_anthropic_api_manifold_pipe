@@ -1661,4 +1661,16 @@ class PipeOrchestratorMethods:
             ]
             return completion
 
+        # Tito streams the reply with its usage in the SSE chunks (see
+        # _tito_usage_stream); every other model keeps the plain text return.
+        if (
+            self.TITO_ACTIVE.get()
+            and include_usage
+            and total_usage
+            and body.get("stream", True)
+        ):
+            return self._tito_usage_stream(
+                final_text(), body.get("model", ""), self._public_usage(total_usage)
+            )
+
         return final_text()

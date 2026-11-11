@@ -11349,6 +11349,18 @@ class Pipe:
             ]
             return completion
 
+        # Tito streams the reply with its usage in the SSE chunks (see
+        # _tito_usage_stream); every other model keeps the plain text return.
+        if (
+            self.TITO_ACTIVE.get()
+            and include_usage
+            and total_usage
+            and body.get("stream", True)
+        ):
+            return self._tito_usage_stream(
+                final_text(), body.get("model", ""), self._public_usage(total_usage)
+            )
+
         return final_text()
 
     """Everything gated on the OWUI model id ``tito``.
@@ -11813,6 +11825,31 @@ class Pipe:
                 f"Tito: tools/system fingerprint changed for chat_id={chat_id}"
             )
         state[chat_id] = (tools_sha, system_sha)
+
+    @staticmethod
+    def _tito_usage_stream(text: str, model: str, usage: dict):
+        """Stream a finished Tito reply so OpenWebUI's middleware sees its usage.
+
+        The middleware persists ``message.usage`` from the ``usage`` key of the
+        SSE chunks it reads from the pipe (``utils/middleware.py``, the chunk loop
+        that merges ``data['usage']`` into ``current_usage``). A plain ``str``
+        return carries no usage, so the middleware's final save wrote
+        ``{"incomplete": true}`` over the direct DB write made by the pipe. This
+        yields the same content chunk a ``str`` return would, then one empty-
+        choices chunk carrying the final usage; OpenWebUI appends its own finish
+        chunk after it.
+        """
+
+        async def _chunks():
+            if text:
+                yield {
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                }
+            yield {"object": "chat.completion.chunk", "model": model, "choices": [], "usage": usage}
+
+        return _chunks()
 
     # END GENERATED SECTION: anthropic_pipe.pipe_method_groups
 

@@ -9150,6 +9150,16 @@ class Pipe:
             ]
             return completion
 
+        if (
+            self.TITO_ACTIVE.get()
+            and include_usage
+            and total_usage
+            and body.get("stream", True)
+        ):
+            return self._tito_usage_stream(
+                final_text(), body.get("model", ""), self._public_usage(total_usage)
+            )
+
         return final_text()
 
     """Everything gated on the OWUI model id ``tito``.
@@ -9550,6 +9560,20 @@ class Pipe:
                 f"Tito: tools/system fingerprint changed for chat_id={chat_id}"
             )
         state[chat_id] = (tools_sha, system_sha)
+
+    @staticmethod
+    def _tito_usage_stream(text: str, model: str, usage: dict):
+
+        async def _chunks():
+            if text:
+                yield {
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                }
+            yield {"object": "chat.completion.chunk", "model": model, "choices": [], "usage": usage}
+
+        return _chunks()
 
     async def _create_payload(
         self,
