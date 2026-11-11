@@ -9278,14 +9278,7 @@ class Pipe:
                         outcome = "replaced"
         except Exception as exc:
             outcome = "error"
-            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-
-            now = _dt.now(_tz.utc)
-            local = now + _td(hours=self._tito_pacific_utc_offset(now))
-            err_id = f"T{local:%H%M}-{os.urandom(2).hex()}"
-            logger.error(
-                "TITO-ERR %s output_guard %s", err_id, self._tito_safe_err(exc, limit=200)
-            )
+            self._tito_err("output_guard", exc)
         logger.info(
             "[TITO] output guard outcome=%s trigger=%s chars=%d visible=%d rebuilt=%d",
             outcome,
@@ -9351,6 +9344,7 @@ class Pipe:
         import re as _re
 
         raw = f"{type(exc).__name__}: {exc}"
+        raw = _re.sub(r"https?://\S+", "[url]", raw)
         raw = _re.sub(r"sk-[A-Za-z0-9_\-]{8,}", "[redacted]", raw)
         raw = _re.sub(
             r"(?i)(x-api-key|authorization|api[_-]?key|bearer)(['\"]?\s*[:=]?\s*)(?:Bearer\s+)?[^\s,'\"}]+",
@@ -9358,6 +9352,16 @@ class Pipe:
             raw,
         )
         return raw[:limit]
+
+    @classmethod
+    def _tito_err(cls, component: str, exc) -> str:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        now = _dt.now(_tz.utc)
+        local = now + _td(hours=cls._tito_pacific_utc_offset(now))
+        code = f"T{local:%H%M}-{os.urandom(2).hex()}"
+        logger.error("TITO-ERR %s %s %s", code, component, cls._tito_safe_err(exc, limit=200))
+        return code
 
     @classmethod
     def _tito_split_system(cls, system):
@@ -9381,6 +9385,7 @@ class Pipe:
     def _tito_frozen_tools(cls) -> list:
         path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
         problem = None
+        err = None
         tools: list = []
         if not path:
             problem = "TITO_TOOLS_FILE is not set"
@@ -9393,9 +9398,11 @@ class Pipe:
                 if not tools:
                     problem = f"TITO_TOOLS_FILE {path} has no tools"
             except Exception as e:
+                err = e
                 problem = f"TITO_TOOLS_FILE {path} unreadable: {cls._tito_safe_err(e)}"
         if problem:
-            logger.error("[TITO] frozen tools unavailable: %s", problem)
+
+            cls._tito_err("tools_file", err if err is not None else RuntimeError(problem))
             if not cls._tito_tools_alerted:
                 cls._tito_tools_alerted = True
                 cls._tito_discord_alert(f"Tito: frozen tools unavailable: {problem}")
@@ -9459,8 +9466,8 @@ class Pipe:
     def _tito_error_text(cls) -> str:
         return cls.TITO_ERROR_TEXT
 
-    @staticmethod
-    def _tito_discord_alert(message: str) -> None:
+    @classmethod
+    def _tito_discord_alert(cls, message: str) -> None:
         webhook = (os.environ.get("TITO_DISCORD_WEBHOOK") or "").strip()
         if not webhook:
             return
@@ -9479,7 +9486,7 @@ class Pipe:
                 )
                 _ur.urlopen(req, timeout=5)
             except Exception as e:
-                logger.debug("Tito Discord alert failed: %s", e)
+                cls._tito_err("discord_alert", e)
 
         try:
             import threading as _th
@@ -9561,7 +9568,7 @@ class Pipe:
                         total += self._tito_usage_cost(msg)
         except Exception as e:
             total = 0.0
-            logger.warning("Tito month_spend_usd DB error (fail-open): %s", e)
+            self._tito_err("month_spend", e)
             self._tito_discord_alert(
                 f"Tito: month_spend_usd DB error (fail-open): {self._tito_safe_err(e)}"
             )
@@ -9604,7 +9611,7 @@ class Pipe:
 
             from PIL import Image
         except Exception as exc:
-            logger.warning("[TITO] image shrink skipped, Pillow unavailable: %s", type(exc).__name__)
+            self._tito_err("image_shrink", exc)
             return payload
 
         def shrink(block: dict) -> dict:
@@ -9644,7 +9651,7 @@ class Pipe:
                 }
                 return {**block, "source": new_source}
             except Exception as exc:
-                logger.warning("[TITO] image shrink failed for one image, sent unchanged: %s", type(exc).__name__)
+                self._tito_err("image_shrink", exc)
                 return block
 
         def walk(blocks: list) -> list:
