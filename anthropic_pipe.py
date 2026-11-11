@@ -3904,6 +3904,13 @@ class Pipe:
             "message once with a minimal fix. Hidden blocks and metadata markers are kept byte-for-byte. "
             "Errors never affect the reply.",
         )
+        TITO_IMAGE_MAX_PX: int = Field(
+            default=0,
+            ge=0,
+            description="Tito only. When > 0, base64 images in the outgoing request whose longest side is larger "
+            "are resized to this many pixels (aspect kept, LANCZOS). JPEG q85 unless the image has transparency. "
+            "0 = off. A failing image is sent unchanged and logged as one WARNING without content.",
+        )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
             description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",
@@ -10068,6 +10075,10 @@ class Pipe:
                         is_tool_loop=(tool_loop_iteration > 1),
                         iteration=tool_loop_iteration,
                     )
+                    # Tito image shrink (valve TITO_IMAGE_MAX_PX, default off). Runs on
+                    # every iteration because tool results can add images to the list.
+                    if self.TITO_ACTIVE.get() and int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0) > 0:
+                        payload_for_stream["messages"] = self._tito_shrink_images(payload_for_stream)["messages"]
                     # Tito per-turn fingerprint: one line, warn + Discord on drift.
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
                         self._tito_log_fingerprint(payload_for_stream, __metadata__)
@@ -11849,6 +11860,84 @@ class Pipe:
             )
         state[chat_id] = (tools_sha, system_sha)
 
+    def _tito_shrink_images(self, payload: dict) -> dict:
+        """Return a payload whose oversized base64 images are downscaled.
+
+        Called only for Tito with ``TITO_IMAGE_MAX_PX`` > 0. Blocks are replaced
+        in new lists and dicts, so the caller's payload is not mutated. An image
+        that cannot be processed is kept as it was; the WARNING names only the
+        exception type.
+        """
+        max_px = int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0)
+        if max_px <= 0:
+            return payload
+        try:
+            import base64
+            import io
+
+            from PIL import Image
+        except Exception as exc:
+            logger.warning("[TITO] image shrink skipped, Pillow unavailable: %s", type(exc).__name__)
+            return payload
+
+        def shrink(block: dict) -> dict:
+            source = block.get("source")
+            if not isinstance(source, dict) or source.get("type") != "base64":
+                return block
+            data = source.get("data")
+            if not isinstance(data, str):
+                return block
+            try:
+                with Image.open(io.BytesIO(base64.b64decode(data))) as im:
+                    width, height = im.size
+                    if max(width, height) <= max_px:
+                        return block
+                    im.load()
+                    has_alpha = im.mode in ("RGBA", "LA") or (
+                        im.mode == "P" and "transparency" in im.info
+                    )
+                    scale = max_px / max(width, height)
+                    resized = im.resize(
+                        (max(1, round(width * scale)), max(1, round(height * scale))),
+                        Image.LANCZOS,
+                    )
+                out = io.BytesIO()
+                if has_alpha:
+                    resized.save(out, format="PNG", optimize=True)
+                    media_type = "image/png"
+                else:
+                    if resized.mode not in ("RGB", "L"):
+                        resized = resized.convert("RGB")
+                    resized.save(out, format="JPEG", quality=85)
+                    media_type = "image/jpeg"
+                new_source = {
+                    **source,
+                    "media_type": media_type,
+                    "data": base64.b64encode(out.getvalue()).decode("ascii"),
+                }
+                return {**block, "source": new_source}
+            except Exception as exc:
+                logger.warning("[TITO] image shrink failed for one image, sent unchanged: %s", type(exc).__name__)
+                return block
+
+        def walk(blocks: list) -> list:
+            result = []
+            for block in blocks:
+                if isinstance(block, dict):
+                    if block.get("type") == "image":
+                        block = shrink(block)
+                    elif isinstance(block.get("content"), list):
+                        block = {**block, "content": walk(block["content"])}
+                result.append(block)
+            return result
+
+        messages = []
+        for message in payload.get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), list):
+                message = {**message, "content": walk(message["content"])}
+            messages.append(message)
+        return {**payload, "messages": messages}
+
     @staticmethod
     def _tito_count_images(request_ctx, payload: dict) -> None:
         """Record image block count and decoded bytes of the outgoing request.
@@ -11888,17 +11977,17 @@ class Pipe:
             return
         now = time.monotonic()
 
-        def ms(key: str, end: float = None) -> int:
+        def ms(key: str, end: float | None = None) -> int:
             value = timing.get(key)
-            return 0 if value is None else int(round(((end if end is not None else value) - t0) * 1000))
+            return 0 if value is None else round(((end if end is not None else value) - t0) * 1000)
 
         logger.info(
             "[TITO] timing ttfb_ms=%d first_text_ms=%d stream_ms=%d guard_ms=%d total_ms=%d "
             "in=%d out=%d cache_read=%d cache_write=%d images=%d image_bytes=%d",
             ms("ttfb"),
             ms("first_text"),
-            int(round(timing.get("stream", 0.0) * 1000)),
-            int(round(timing.get("guard", 0.0) * 1000)),
+            round(timing.get("stream", 0.0) * 1000),
+            round(timing.get("guard", 0.0) * 1000),
             ms("t0", now),
             usage.get("input_tokens", 0),
             usage.get("output_tokens", 0),

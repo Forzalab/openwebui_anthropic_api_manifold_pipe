@@ -239,6 +239,8 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ### `v0.11.0`
 - Tito model (OWUI model id `tito`): fixed config (effort `medium`, adaptive thinking, Opus-5-5 advisor, `web_search` Fresno/10 uses, tool search off), a frozen tools array loaded from `TITO_TOOLS_FILE`, a Pacific-month budget gate (`TITO_HARD_CAP_USD` 22 / `TITO_SOFT_CAP_USD` 15, fail-open) and Vietnamese-only error mapping. Gated entirely on `__metadata__["model"]["id"] == "tito"`; every other model is byte-for-byte unchanged
 - Tito logs one `[TITO] timing ...` INFO line per turn (time to first byte, first text, stream, output guard, total; token counts; image count and bytes). Numbers only, no content
+- Valve `TITO_IMAGE_MAX_PX` (default `0` = off): when set, Tito downscales base64 images whose longest side is larger (LANCZOS, JPEG q85 unless transparent). Sent unchanged if Pillow is missing or an image fails
+
 
 ### `v0.10.2`
 - Logs carry no chat content or personal data at any level, DEBUG included. The `[PAYLOAD]` line replaces every string in `messages`, `system` and `metadata` with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and `cache_control` stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters

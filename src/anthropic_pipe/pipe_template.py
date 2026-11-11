@@ -1031,6 +1031,13 @@ class Pipe:
             "message once with a minimal fix. Hidden blocks and metadata markers are kept byte-for-byte. "
             "Errors never affect the reply.",
         )
+        TITO_IMAGE_MAX_PX: int = Field(
+            default=0,
+            ge=0,
+            description="Tito only. When > 0, base64 images in the outgoing request whose longest side is larger "
+            "are resized to this many pixels (aspect kept, LANCZOS). JPEG q85 unless the image has transparency. "
+            "0 = off. A failing image is sent unchanged and logged as one WARNING without content.",
+        )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
             description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",

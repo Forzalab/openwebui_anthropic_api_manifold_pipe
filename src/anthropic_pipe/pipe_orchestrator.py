@@ -376,6 +376,10 @@ class PipeOrchestratorMethods:
                         is_tool_loop=(tool_loop_iteration > 1),
                         iteration=tool_loop_iteration,
                     )
+                    # Tito image shrink (valve TITO_IMAGE_MAX_PX, default off). Runs on
+                    # every iteration because tool results can add images to the list.
+                    if self.TITO_ACTIVE.get() and int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0) > 0:
+                        payload_for_stream["messages"] = self._tito_shrink_images(payload_for_stream)["messages"]
                     # Tito per-turn fingerprint: one line, warn + Discord on drift.
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
                         self._tito_log_fingerprint(payload_for_stream, __metadata__)
