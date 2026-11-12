@@ -232,11 +232,83 @@ class ModelPricing:
             }
         return call_rates
 
+    @staticmethod
+    def _field(obj: Any, name: str, default: Any = None) -> Any:
+        """Read `name` from an SDK object or a plain dict."""
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    @classmethod
+    def record_advisor_iterations(cls, usage: Any, total_usage: dict, prior: Optional[dict]) -> dict:
+        """Add the advisor sub-inferences of one API call to the turn tally.
+
+        With the advisor tool the response `usage.iterations` itemizes every
+        sampling pass; the `advisor_message` entries carry the ADVISOR model's
+        own tokens. Top-level `usage` holds the executor only, so these are
+        extra, never double counted. Entries of other types (`message`,
+        `compaction`, ...) are skipped. The iterations list is cumulative
+        within one API call, so `prior` is the snapshot returned for the same
+        call last time (None/{} on the first look) and only the growth is
+        added. Returns the new snapshot; anything malformed is ignored.
+        """
+        snapshot: dict = {}
+        for entry in cls._field(usage, "iterations", None) or ():
+            if cls._field(entry, "type") != "advisor_message":
+                continue
+            model = cls._field(entry, "model")
+            if not isinstance(model, str) or not model:
+                continue
+            cache_creation = cls._field(entry, "cache_creation")
+            write_5m = cls._field(cache_creation, "ephemeral_5m_input_tokens") if cache_creation else None
+            write_1h = cls._field(cache_creation, "ephemeral_1h_input_tokens") if cache_creation else None
+            if write_5m is None and write_1h is None:
+                write_5m = cls._field(entry, "cache_creation_input_tokens")
+            acc = snapshot.setdefault(model, dict.fromkeys(cls.TOKEN_KEYS, 0))
+            for key, value in (
+                ("input", cls._field(entry, "input_tokens")),
+                ("output", cls._field(entry, "output_tokens")),
+                ("cache_write_5m", write_5m),
+                ("cache_write_1h", write_1h),
+                ("cache_read", cls._field(entry, "cache_read_input_tokens")),
+            ):
+                acc[key] += value if isinstance(value, (int, float)) else 0
+        prior = prior or {}
+        tally = total_usage.setdefault("_advisor", {})
+        for model, acc in snapshot.items():
+            before = prior.get(model, {})
+            dest = tally.setdefault(model, dict.fromkeys(cls.TOKEN_KEYS, 0))
+            for key in cls.TOKEN_KEYS:
+                dest[key] += max(acc[key] - before.get(key, 0), 0)
+        return snapshot
+
+    def price_call(self, model_name: str, usage: Any) -> Optional[float]:
+        """USD cost of one standalone API call from its `usage`, or None if unpriced."""
+        rates = self.rates_for(model_name)
+        if not rates or usage is None:
+            return None
+        tally: dict = {}
+        self.record_call(
+            tally,
+            input_tokens=self._field(usage, "input_tokens", 0) or 0,
+            output_tokens=self._field(usage, "output_tokens", 0) or 0,
+            cache_write_5m=self._field(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_write_1h=0,
+            cache_read=self._field(usage, "cache_read_input_tokens", 0) or 0,
+        )
+        call = tally["_call_log"][0]
+        threshold = rates.get("long_context_threshold")
+        call_rates = self._call_rates(
+            rates, fast=False, long=bool(threshold) and call["prompt"] > threshold
+        )
+        total = sum(call[key] * call_rates[key] for key in self.TOKEN_KEYS)
+        return round(total / 1_000_000, 6)
+
     def breakdown(self, model_name: str, total_usage: dict) -> Optional[dict]:
         """Per-component USD cost of a whole turn, or None if the model's rates are unknown.
 
         Keys: input, output, cache_write_5m, cache_write_1h, cache_read,
-        web_search -- only the components that actually cost something, so
+        web_search, advisor (the advisor model's own iterations) -- only the components that actually cost something, so
         the usage tooltip stays short on a plain turn. Modifiers are baked into
         the token components, mirroring Anthropic's stacking rules: fast mode
         and a prompt-length tier are priced per API call (`_call_log`), with
@@ -290,6 +362,17 @@ class ModelPricing:
         components["web_search"] = (
             total_usage.get("_web_search_requests", 0) * self.WEB_SEARCH_REQUEST_USD
         )
+        advisor_usd = 0.0
+        for adv_model, adv_tokens in (total_usage.get("_advisor") or {}).items():
+            adv_rates = self.rates_for(adv_model)
+            if not adv_rates:
+                logger.debug(f"No rate card for advisor model {adv_model}; advisor cost skipped")
+                continue
+            adv_call = self._call_rates(adv_rates, fast=False, long=False)
+            advisor_usd += (
+                sum(adv_tokens.get(k, 0) * adv_call[k] for k in self.TOKEN_KEYS) * geo / 1_000_000
+            )
+        components["advisor"] = advisor_usd
         rounded = {name: round(amount, 6) for name, amount in components.items()}
         return {name: amount for name, amount in rounded.items() if amount}
 

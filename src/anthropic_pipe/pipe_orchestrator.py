@@ -367,6 +367,7 @@ class PipeOrchestratorMethods:
                 # Reset per-iteration state
                 stream_output_tokens = 0
                 stream_web_search_requests = 0
+                stream_advisor_snapshot: dict = {}
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
@@ -540,6 +541,11 @@ class PipeOrchestratorMethods:
                                             + (current_searches - stream_web_search_requests)
                                         )
                                         stream_web_search_requests = current_searches
+                                        # Advisor sub-inferences (usage.iterations),
+                                        # priced at the advisor model's own rates.
+                                        stream_advisor_snapshot = ModelPricing.record_advisor_iterations(
+                                            usage, total_usage, stream_advisor_snapshot
+                                        )
                                         ModelPricing.record_billing_modifiers(usage, total_usage)
                                         ModelPricing.update_call_output(total_usage, current_output_tokens)
                                 delta = getattr(event, "delta", None)
@@ -1558,7 +1564,13 @@ class PipeOrchestratorMethods:
         # both carry the edited version. Never blocks or fails the reply.
         if not is_internal:
             try:
-                await self._tito_output_guard(request_ctx, client, __metadata__)
+                await self._tito_output_guard(
+                    request_ctx,
+                    client,
+                    __metadata__,
+                    total_usage=total_usage if include_usage else None,
+                    pricing=self._model_pricing(),
+                )
             except Exception as _guard_err:
                 logger.warning(
                     "[TITO] output guard failed (keeping reply): %s", _guard_err

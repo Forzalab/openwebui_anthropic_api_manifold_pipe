@@ -235,12 +235,14 @@ def _guard_response_text(response) -> str:
     return "".join(parts)
 
 
-async def guard_verdict(client, visible_text: str) -> tuple:
+async def guard_verdict(client, visible_text: str, usage_sink: "list | None" = None) -> tuple:
     """One Haiku call. Returns ``(outcome, edited)``.
 
     ``outcome`` is ``"kept_ok"`` (nothing breaks), ``"kept_parse"`` (no usable
     JSON answer), ``"kept_safety"`` (the edit lost a number, URL or digit token)
     or ``"replace"`` with the edited text. Client exceptions propagate.
+    When ``usage_sink`` is a list, ``(TITO_GUARD_MODEL, response.usage)`` is
+    appended so the caller can price the call.
     No ``temperature`` is sent: current models reject it.
     """
     if not visible_text or not visible_text.strip():
@@ -252,6 +254,8 @@ async def guard_verdict(client, visible_text: str) -> tuple:
         system=TITO_GUARD_RULES,
         messages=[{"role": "user", "content": visible_text}],
     )
+    if usage_sink is not None:
+        usage_sink.append((TITO_GUARD_MODEL, getattr(response, "usage", None)))
 
     data = _parse_guard_json(_guard_response_text(response))
     if data is None:
