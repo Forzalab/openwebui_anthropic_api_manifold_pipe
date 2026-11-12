@@ -89,10 +89,12 @@ else:
             record("advisor max_uses 3", cfg.get("advisor", {}).get("max_uses") == 3)
             record("advisor caching 5m", cfg.get("advisor", {}).get("caching") == "5m")
             record("enable_tool_search off", cfg.get("enable_tool_search") is False)
-            record("web_search_max_uses 10", cfg.get("web_search_max_uses") == 10)
+            record("web_search_max_uses 3", cfg.get("web_search_max_uses") == 3)
+            record("web_fetch_max_uses 2", cfg.get("web_fetch_max_uses") == 2)
+            record("web_fetch_max_content_tokens 8000", cfg.get("web_fetch_max_content_tokens") == 8000)
             record("user_location Fresno", cfg.get("user_location") == {"city": "Fresno"})
             record("hide_blocks", cfg.get("hide_blocks") == ["advisor", "web_search", "web_fetch"])
-            record("cache P6", cfg.get("cache") == {"ttl": "1h", "tools_breakpoint": False, "system_breakpoints": 2},
+            record("cache P6", cfg.get("cache") == {"ttl": "1h", "messages_ttl": "5m", "tools_breakpoint": False, "system_breakpoints": 2},
                    repr(cfg.get("cache")))
             record("show_cost on", cfg.get("show_cost") is True)
 
@@ -364,6 +366,9 @@ def _run_cache_checks():
         valves = CV()
         TITO_ACTIVE = _cv.ContextVar("test_tito_active", default=False)
 
+        def _tito_config(self):  # the real Pipe gets this from PipeTitoMethods
+            return dict(_tito.PipeTitoMethods.TITO_CONFIG) if _tito else {}
+
     # P6: full _apply_cache_control for tito.
     payload = {
         "tools": [{"name": "web_search", "type": "web_search_20250305"}],
@@ -383,6 +388,8 @@ def _run_cache_checks():
            payload["system"][0].get("cache_control") == {"type": "ephemeral", "ttl": TITO_EXPECT["cache_ttl"]},
            repr(payload["system"][0].get("cache_control")))
     record("P6 last-message breakpoint present", msg_cc)
+    msg_marker = payload["messages"][-1]["content"][-1].get("cache_control")
+    record("P6 message breakpoint is 5m (no ttl)", msg_marker == {"type": "ephemeral"}, repr(msg_marker))
 
     # PATCH D/H3: messages breakpoint must skip a mid_conversation system message.
     user_msg = {"role": "user", "content": [{"type": "text", "text": "hi"}]}
