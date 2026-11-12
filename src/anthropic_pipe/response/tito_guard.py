@@ -244,6 +244,7 @@ async def guard_verdict(client, visible_text: str, usage_sink: "list | None" = N
     When ``usage_sink`` is a list, ``(TITO_GUARD_MODEL, response.usage)`` is
     appended so the caller can price the call.
     No ``temperature`` is sent: current models reject it.
+    Thinking is disabled explicitly because Haiku 5.5 thinks by default, which added latency and parse failures (thinking ate max_tokens).
     """
     if not visible_text or not visible_text.strip():
         return ("kept_ok", None)
@@ -251,6 +252,7 @@ async def guard_verdict(client, visible_text: str, usage_sink: "list | None" = N
     response = await client.messages.create(
         model=TITO_GUARD_MODEL,
         max_tokens=min(8192, max(256, len(visible_text) * 2)),
+        thinking={"type": "disabled"},
         system=TITO_GUARD_RULES,
         messages=[{"role": "user", "content": visible_text}],
     )
