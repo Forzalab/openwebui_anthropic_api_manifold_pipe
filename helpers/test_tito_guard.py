@@ -275,6 +275,16 @@ async def test_final_replace_carries_guarded_text():
     assert replaces[-1] == replaces[0], (replaces[0], replaces[-1])
 
 
+async def test_guard_disables_thinking_and_sends_no_temperature():
+    """The guard call sends thinking disabled (Haiku 5.5 thinks by default) and no temperature."""
+    client = FakeClient('{"ok": true}')
+    await GUARD.guard(client, "Tito chào anh. Anh ăn gì chưa? Anh ngủ chưa?")
+    assert len(client.calls) == 1, client.calls
+    call = client.calls[0]
+    assert call.get("thinking") == {"type": "disabled"}, call
+    assert "temperature" not in call, call
+
+
 async def test_guard_never_sends_temperature():
     """No request kwarg named temperature, on success, on an edit, or on an SDK TypeError."""
     text = "Tito chào anh. Anh ăn gì chưa? Anh ngủ chưa?"

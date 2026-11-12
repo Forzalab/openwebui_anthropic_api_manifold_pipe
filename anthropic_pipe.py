@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.1
+version: 0.11.2
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.2
+- Tito output guard sends `thinking: {"type": "disabled"}` explicitly, since Haiku 5.5 thinks by default and that added latency and parse failures (thinking ate max_tokens).
+
 v0.11.1
 - Tito output guard (valve `TITO_OUTPUT_GUARD`, default on): after a Tito reply finishes, a cheap local pre-check looks for rule breaks (no final question, more than one question, "tôi", long dashes, tool/AI/sleep wording, a paragraph over three sentences). Only then is `claude-haiku-5-5` asked for the smallest fix. An edit that loses a number, URL or digit-bearing token is rejected. On an accepted edit the message is replaced once, keeping every `<details>` block, `[anthropic-hidden-...]` carrier and metadata marker byte-for-byte. Any error leaves the streamed reply untouched; non-Tito models never reach it.
 
@@ -3367,6 +3370,7 @@ async def guard_verdict(client, visible_text: str, usage_sink: "list | None" = N
     response = await client.messages.create(
         model=TITO_GUARD_MODEL,
         max_tokens=min(8192, max(256, len(visible_text) * 2)),
+        thinking={"type": "disabled"},
         system=TITO_GUARD_RULES,
         messages=[{"role": "user", "content": visible_text}],
     )
