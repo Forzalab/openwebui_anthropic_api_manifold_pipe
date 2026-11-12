@@ -6617,10 +6617,17 @@ class Pipe:
         # deliberately skipped (Sonnet-5-5 -> Opus-5-5 is a valid pair).
         advisor_cfg = tito_cfg.get("advisor") or {}
         if advisor_cfg.get("enabled", True):
+            # The executor (actual_model_name) can override the advisor by id prefix.
+            executor = actual_model_name.split("/")[-1]
+            advisor_model = advisor_cfg.get("model") or "claude-opus-5-5"
+            for prefix, model in (tito_cfg.get("advisor_by_executor") or {}).items():
+                if executor.startswith(prefix):
+                    advisor_model = model
+                    break
             advisor: dict = {
                 "type": "advisor_20260301",
                 "name": "advisor",
-                "model": advisor_cfg.get("model") or "claude-opus-5-5",
+                "model": advisor_model,
             }
             max_uses = advisor_cfg.get("max_uses")
             if max_uses:
@@ -11517,6 +11524,9 @@ class Pipe:
         "thinking": {"type": "adaptive"},
         "effort": "medium",
         "advisor": {"enabled": True, "model": "claude-opus-5-5", "max_uses": 3, "caching": "5m"},
+        # Executor model-id prefix -> advisor model; wins over advisor.model when
+        # the executor starts with the prefix (any claude-haiku-* gets Sonnet).
+        "advisor_by_executor": {"claude-haiku-": "claude-sonnet-5-5"},
         "enable_tool_search": False,
         "hide_blocks": ["advisor", "web_search", "web_fetch"],
         "web_search_max_uses": 3,
