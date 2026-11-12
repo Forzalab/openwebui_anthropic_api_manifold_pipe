@@ -78,7 +78,9 @@ class PipeTitoMethods:
             getattr(self.valves, "TITO_QUIET_UI", True) and self._is_tito(metadata)
         )
 
-    async def _tito_output_guard(self, request_ctx, client, metadata) -> None:
+    async def _tito_output_guard(
+        self, request_ctx, client, metadata, total_usage=None, pricing=None
+    ) -> None:
         """Check Tito's visible reply with Haiku and replace it once if needed.
 
         Only visible prose is sent; ``<details>`` blocks, ``[anthropic-hidden-]``
@@ -88,6 +90,10 @@ class PipeTitoMethods:
         Logs exactly one INFO line per Tito run (lengths only, never reply text):
         ``outcome`` is clean | kept_ok | kept_parse | kept_safety | kept_markers |
         replaced | error. On error a ``TITO-ERR`` line with a support id follows.
+
+        With ``total_usage`` and ``pricing`` the Haiku call's own cost is added
+        to ``cost_usd`` and ``cost_breakdown_usd['guard']`` (before the usage is
+        persisted); a missing usage or rate card adds nothing.
         """
         if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
             return
@@ -97,6 +103,7 @@ class PipeTitoMethods:
         if timing is not None:
             timing["guard_t0"] = time.monotonic()
 
+        usage_sink: list = []
         outcome = "error"
         trigger = "none"
         content = ""
@@ -112,7 +119,7 @@ class PipeTitoMethods:
             else:
                 trigger = found
                 request_text, _sentinels = tito_guard_layout(segments)
-                verdict, edited = await guard_verdict(client, request_text)
+                verdict, edited = await guard_verdict(client, request_text, usage_sink)
                 outcome = verdict
                 if verdict == "replace":
                     rebuilt = tito_guard_rebuild(segments, edited)
@@ -127,6 +134,17 @@ class PipeTitoMethods:
         except Exception as exc:
             outcome = "error"
             self._tito_err("output_guard", exc)
+        if total_usage is not None and pricing is not None and usage_sink:
+            try:
+                guard_model, guard_usage = usage_sink[0]
+                guard_usd = pricing.price_call(guard_model, guard_usage)
+                if guard_usd:
+                    total_usage["cost_usd"] = round(total_usage.get("cost_usd", 0.0) + guard_usd, 6)
+                    breakdown = dict(total_usage.get("cost_breakdown_usd") or {})
+                    breakdown["guard"] = round(breakdown.get("guard", 0.0) + guard_usd, 6)
+                    total_usage["cost_breakdown_usd"] = breakdown
+            except Exception as exc:
+                logger.debug("[TITO] guard cost capture failed: %s", exc)
         logger.info(
             "[TITO] output guard outcome=%s trigger=%s chars=%d visible=%d rebuilt=%d",
             outcome,

@@ -3360,7 +3360,7 @@ def _guard_response_text(response) -> str:
     return "".join(parts)
 
 
-async def guard_verdict(client, visible_text: str) -> tuple:
+async def guard_verdict(client, visible_text: str, usage_sink: "list | None" = None) -> tuple:
     if not visible_text or not visible_text.strip():
         return ("kept_ok", None)
 
@@ -3370,6 +3370,8 @@ async def guard_verdict(client, visible_text: str) -> tuple:
         system=TITO_GUARD_RULES,
         messages=[{"role": "user", "content": visible_text}],
     )
+    if usage_sink is not None:
+        usage_sink.append((TITO_GUARD_MODEL, getattr(response, "usage", None)))
 
     data = _parse_guard_json(_guard_response_text(response))
     if data is None:
@@ -3582,6 +3584,65 @@ class ModelPricing:
             }
         return call_rates
 
+    @staticmethod
+    def _field(obj: Any, name: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    @classmethod
+    def record_advisor_iterations(cls, usage: Any, total_usage: dict, prior: Optional[dict]) -> dict:
+        snapshot: dict = {}
+        for entry in cls._field(usage, "iterations", None) or ():
+            if cls._field(entry, "type") != "advisor_message":
+                continue
+            model = cls._field(entry, "model")
+            if not isinstance(model, str) or not model:
+                continue
+            cache_creation = cls._field(entry, "cache_creation")
+            write_5m = cls._field(cache_creation, "ephemeral_5m_input_tokens") if cache_creation else None
+            write_1h = cls._field(cache_creation, "ephemeral_1h_input_tokens") if cache_creation else None
+            if write_5m is None and write_1h is None:
+                write_5m = cls._field(entry, "cache_creation_input_tokens")
+            acc = snapshot.setdefault(model, dict.fromkeys(cls.TOKEN_KEYS, 0))
+            for key, value in (
+                ("input", cls._field(entry, "input_tokens")),
+                ("output", cls._field(entry, "output_tokens")),
+                ("cache_write_5m", write_5m),
+                ("cache_write_1h", write_1h),
+                ("cache_read", cls._field(entry, "cache_read_input_tokens")),
+            ):
+                acc[key] += value if isinstance(value, (int, float)) else 0
+        prior = prior or {}
+        tally = total_usage.setdefault("_advisor", {})
+        for model, acc in snapshot.items():
+            before = prior.get(model, {})
+            dest = tally.setdefault(model, dict.fromkeys(cls.TOKEN_KEYS, 0))
+            for key in cls.TOKEN_KEYS:
+                dest[key] += max(acc[key] - before.get(key, 0), 0)
+        return snapshot
+
+    def price_call(self, model_name: str, usage: Any) -> Optional[float]:
+        rates = self.rates_for(model_name)
+        if not rates or usage is None:
+            return None
+        tally: dict = {}
+        self.record_call(
+            tally,
+            input_tokens=self._field(usage, "input_tokens", 0) or 0,
+            output_tokens=self._field(usage, "output_tokens", 0) or 0,
+            cache_write_5m=self._field(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_write_1h=0,
+            cache_read=self._field(usage, "cache_read_input_tokens", 0) or 0,
+        )
+        call = tally["_call_log"][0]
+        threshold = rates.get("long_context_threshold")
+        call_rates = self._call_rates(
+            rates, fast=False, long=bool(threshold) and call["prompt"] > threshold
+        )
+        total = sum(call[key] * call_rates[key] for key in self.TOKEN_KEYS)
+        return round(total / 1_000_000, 6)
+
     def breakdown(self, model_name: str, total_usage: dict) -> Optional[dict]:
         rates = self.rates_for(model_name)
         if not rates:
@@ -3629,6 +3690,17 @@ class ModelPricing:
         components["web_search"] = (
             total_usage.get("_web_search_requests", 0) * self.WEB_SEARCH_REQUEST_USD
         )
+        advisor_usd = 0.0
+        for adv_model, adv_tokens in (total_usage.get("_advisor") or {}).items():
+            adv_rates = self.rates_for(adv_model)
+            if not adv_rates:
+                logger.debug(f"No rate card for advisor model {adv_model}; advisor cost skipped")
+                continue
+            adv_call = self._call_rates(adv_rates, fast=False, long=False)
+            advisor_usd += (
+                sum(adv_tokens.get(k, 0) * adv_call[k] for k in self.TOKEN_KEYS) * geo / 1_000_000
+            )
+        components["advisor"] = advisor_usd
         rounded = {name: round(amount, 6) for name, amount in components.items()}
         return {name: amount for name, amount in rounded.items() if amount}
 
@@ -10083,6 +10155,7 @@ class Pipe:
                 # Reset per-iteration state
                 stream_output_tokens = 0
                 stream_web_search_requests = 0
+                stream_advisor_snapshot: dict = {}
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
@@ -10256,6 +10329,11 @@ class Pipe:
                                             + (current_searches - stream_web_search_requests)
                                         )
                                         stream_web_search_requests = current_searches
+                                        # Advisor sub-inferences (usage.iterations),
+                                        # priced at the advisor model's own rates.
+                                        stream_advisor_snapshot = ModelPricing.record_advisor_iterations(
+                                            usage, total_usage, stream_advisor_snapshot
+                                        )
                                         ModelPricing.record_billing_modifiers(usage, total_usage)
                                         ModelPricing.update_call_output(total_usage, current_output_tokens)
                                 delta = getattr(event, "delta", None)
@@ -11274,7 +11352,13 @@ class Pipe:
         # both carry the edited version. Never blocks or fails the reply.
         if not is_internal:
             try:
-                await self._tito_output_guard(request_ctx, client, __metadata__)
+                await self._tito_output_guard(
+                    request_ctx,
+                    client,
+                    __metadata__,
+                    total_usage=total_usage if include_usage else None,
+                    pricing=self._model_pricing(),
+                )
             except Exception as _guard_err:
                 logger.warning(
                     "[TITO] output guard failed (keeping reply): %s", _guard_err
@@ -11471,7 +11555,9 @@ class Pipe:
             getattr(self.valves, "TITO_QUIET_UI", True) and self._is_tito(metadata)
         )
 
-    async def _tito_output_guard(self, request_ctx, client, metadata) -> None:
+    async def _tito_output_guard(
+        self, request_ctx, client, metadata, total_usage=None, pricing=None
+    ) -> None:
         """Check Tito's visible reply with Haiku and replace it once if needed.
 
         Only visible prose is sent; ``<details>`` blocks, ``[anthropic-hidden-]``
@@ -11481,6 +11567,10 @@ class Pipe:
         Logs exactly one INFO line per Tito run (lengths only, never reply text):
         ``outcome`` is clean | kept_ok | kept_parse | kept_safety | kept_markers |
         replaced | error. On error a ``TITO-ERR`` line with a support id follows.
+
+        With ``total_usage`` and ``pricing`` the Haiku call's own cost is added
+        to ``cost_usd`` and ``cost_breakdown_usd['guard']`` (before the usage is
+        persisted); a missing usage or rate card adds nothing.
         """
         if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
             return
@@ -11490,6 +11580,7 @@ class Pipe:
         if timing is not None:
             timing["guard_t0"] = time.monotonic()
 
+        usage_sink: list = []
         outcome = "error"
         trigger = "none"
         content = ""
@@ -11505,7 +11596,7 @@ class Pipe:
             else:
                 trigger = found
                 request_text, _sentinels = tito_guard_layout(segments)
-                verdict, edited = await guard_verdict(client, request_text)
+                verdict, edited = await guard_verdict(client, request_text, usage_sink)
                 outcome = verdict
                 if verdict == "replace":
                     rebuilt = tito_guard_rebuild(segments, edited)
@@ -11520,6 +11611,17 @@ class Pipe:
         except Exception as exc:
             outcome = "error"
             self._tito_err("output_guard", exc)
+        if total_usage is not None and pricing is not None and usage_sink:
+            try:
+                guard_model, guard_usage = usage_sink[0]
+                guard_usd = pricing.price_call(guard_model, guard_usage)
+                if guard_usd:
+                    total_usage["cost_usd"] = round(total_usage.get("cost_usd", 0.0) + guard_usd, 6)
+                    breakdown = dict(total_usage.get("cost_breakdown_usd") or {})
+                    breakdown["guard"] = round(breakdown.get("guard", 0.0) + guard_usd, 6)
+                    total_usage["cost_breakdown_usd"] = breakdown
+            except Exception as exc:
+                logger.debug("[TITO] guard cost capture failed: %s", exc)
         logger.info(
             "[TITO] output guard outcome=%s trigger=%s chars=%d visible=%d rebuilt=%d",
             outcome,
