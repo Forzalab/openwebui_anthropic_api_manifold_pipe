@@ -4226,7 +4226,7 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
+        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1", "claude-sonnet-5-5"] = Field(
             default="claude-opus-5",
             description="Advisor model ID.",
         )
@@ -4304,10 +4304,18 @@ class Pipe:
         longer than messages but never shorter. A configuration that inverts that
         is clamped to the messages TTL rather than sent and silently mis-billed.
 
-        Tito (P6) pins every marker to a 1h TTL regardless of the valve.
+        Tito (P6) pins tools/system markers to a 1h TTL regardless of the valve.
+        Tito's message breakpoints follow ``TITO_CONFIG["cache"]["messages_ttl"]``:
+        ``"5m"`` gives a plain 5-minute marker (no ``ttl`` key); when the key is
+        absent they stay 1h as before. 1h tools/system markers precede the 5m
+        message markers in the prompt, so the ordering rule above still holds.
         """
         _tito_cv = getattr(self, "TITO_ACTIVE", None)
         if _tito_cv is not None and _tito_cv.get():
+            _cfg_fn = getattr(self, "_tito_config", None)
+            _tito_cache = (_cfg_fn() if _cfg_fn else {}).get("cache") or {}
+            if scope == "messages" and _tito_cache.get("messages_ttl") == "5m":
+                return {"type": "ephemeral"}
             return {"type": "ephemeral", "ttl": "1h"}
 
         setting = self.valves.CACHE_TTL
@@ -6560,7 +6568,7 @@ class Pipe:
             "supports_web_search_tool", True
         ):
             ws: dict = {"type": "web_search_20250305", "name": "web_search"}
-            ws["max_uses"] = tito_cfg.get("web_search_max_uses", 10)
+            ws["max_uses"] = tito_cfg.get("web_search_max_uses", 3)
             loc_fields = {
                 k: v for k, v in (tito_cfg.get("user_location") or {}).items() if v
             }
@@ -6572,7 +6580,10 @@ class Pipe:
         # web_fetch: default max_uses, pinned for stability.
         if self.valves.WEB_FETCH:
             wf: dict = {"type": "web_fetch_20250910", "name": "web_fetch"}
-            wf["max_uses"] = tito_cfg.get("web_fetch_max_uses", 5)
+            wf["max_uses"] = tito_cfg.get("web_fetch_max_uses", 2)
+            max_content_tokens = tito_cfg.get("web_fetch_max_content_tokens") or 0
+            if max_content_tokens > 0:
+                wf["max_content_tokens"] = max_content_tokens
             tools.append(wf)
             names_seen.add("web_fetch")
 
@@ -11424,10 +11435,11 @@ class Pipe:
         "advisor": {"enabled": True, "model": "claude-opus-5-5", "max_uses": 3, "caching": "5m"},
         "enable_tool_search": False,
         "hide_blocks": ["advisor", "web_search", "web_fetch"],
-        "web_search_max_uses": 10,
-        "web_fetch_max_uses": 5,
+        "web_search_max_uses": 3,
+        "web_fetch_max_uses": 2,
+        "web_fetch_max_content_tokens": 8000,
         "user_location": {"city": "Fresno"},
-        "cache": {"ttl": "1h", "tools_breakpoint": False, "system_breakpoints": 2},
+        "cache": {"ttl": "1h", "messages_ttl": "5m", "tools_breakpoint": False, "system_breakpoints": 2},
         "show_cost": True,
         "strip_reasoning_effort": True,
         "skip_tool_search_nudge": True,

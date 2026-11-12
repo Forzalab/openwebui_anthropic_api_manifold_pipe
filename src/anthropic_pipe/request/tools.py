@@ -538,7 +538,7 @@ class PipeRequestToolsMethods:
             "supports_web_search_tool", True
         ):
             ws: dict = {"type": "web_search_20250305", "name": "web_search"}
-            ws["max_uses"] = tito_cfg.get("web_search_max_uses", 10)
+            ws["max_uses"] = tito_cfg.get("web_search_max_uses", 3)
             loc_fields = {
                 k: v for k, v in (tito_cfg.get("user_location") or {}).items() if v
             }
@@ -550,7 +550,10 @@ class PipeRequestToolsMethods:
         # web_fetch: default max_uses, pinned for stability.
         if self.valves.WEB_FETCH:
             wf: dict = {"type": "web_fetch_20250910", "name": "web_fetch"}
-            wf["max_uses"] = tito_cfg.get("web_fetch_max_uses", 5)
+            wf["max_uses"] = tito_cfg.get("web_fetch_max_uses", 2)
+            max_content_tokens = tito_cfg.get("web_fetch_max_content_tokens") or 0
+            if max_content_tokens > 0:
+                wf["max_content_tokens"] = max_content_tokens
             tools.append(wf)
             names_seen.add("web_fetch")
 

@@ -22,10 +22,18 @@ class PipeCacheControlMethods:
         longer than messages but never shorter. A configuration that inverts that
         is clamped to the messages TTL rather than sent and silently mis-billed.
 
-        Tito (P6) pins every marker to a 1h TTL regardless of the valve.
+        Tito (P6) pins tools/system markers to a 1h TTL regardless of the valve.
+        Tito's message breakpoints follow ``TITO_CONFIG["cache"]["messages_ttl"]``:
+        ``"5m"`` gives a plain 5-minute marker (no ``ttl`` key); when the key is
+        absent they stay 1h as before. 1h tools/system markers precede the 5m
+        message markers in the prompt, so the ordering rule above still holds.
         """
         _tito_cv = getattr(self, "TITO_ACTIVE", None)
         if _tito_cv is not None and _tito_cv.get():
+            _cfg_fn = getattr(self, "_tito_config", None)
+            _tito_cache = (_cfg_fn() if _cfg_fn else {}).get("cache") or {}
+            if scope == "messages" and _tito_cache.get("messages_ttl") == "5m":
+                return {"type": "ephemeral"}
             return {"type": "ephemeral", "ttl": "1h"}
 
         setting = self.valves.CACHE_TTL
