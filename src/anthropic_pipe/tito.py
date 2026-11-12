@@ -40,6 +40,9 @@ class PipeTitoMethods:
         "thinking": {"type": "adaptive"},
         "effort": "medium",
         "advisor": {"enabled": True, "model": "claude-opus-5-5", "max_uses": 3, "caching": "5m"},
+        # Executor model-id prefix -> advisor model; wins over advisor.model when
+        # the executor starts with the prefix (any claude-haiku-* gets Sonnet).
+        "advisor_by_executor": {"claude-haiku-": "claude-sonnet-5-5"},
         "enable_tool_search": False,
         "hide_blocks": ["advisor", "web_search", "web_fetch"],
         "web_search_max_uses": 3,
