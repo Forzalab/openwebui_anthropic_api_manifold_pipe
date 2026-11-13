@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.3
+version: 0.11.4
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.4
+- Tito decide shadow (valve `TITO_DECIDE`, default off): per Tito turn, three flags (smart_consumer, needs_search, ke_anh_nghe) are scored with OpenRouter MSD-1 in parallel, started before the main stream and awaited after it. One `[TITO] decide` line is logged; the reply is never changed or delayed. Any error or timeout falls back to a Vietnamese keyword regex per flag. The key (`TITO_DECIDE_KEY`, encrypted at rest) and message text are never logged.
+
 v0.11.3
 - Tito per-turn VN reminder (valve `TITO_VN_REMINDER`, default empty = off): one extra text block appended to the last user message of the first request of each turn, after the prompt-cache breakpoints. It carries no cache_control, is removed before the next tool-loop iteration, and is never logged (only its length).
 
@@ -3383,6 +3386,22 @@ class Pipe:
             description="Tito only. Text appended as one extra block to the last user message of the first "
             "request of each turn, after the prompt-cache breakpoints, so the cached prefix never changes. "
             "Empty = off. Not logged.",
+        )
+        TITO_DECIDE: bool = Field(
+            default=False,
+            description="Tito only. Shadow mode: per turn, score three flags with OpenRouter MSD-1 and log "
+            "one [TITO] decide line. No effect on the reply. Off = no call.",
+        )
+        TITO_DECIDE_KEY: EncryptedStr = Field(
+            default="",
+            description="Tito only. OpenRouter API key for TITO_DECIDE. Stored encrypted when "
+            "WEBUI_SECRET_KEY is set. Never logged.",
+        )
+        TITO_DECIDE_TIMEOUT_MS: int = Field(
+            default=1500,
+            ge=100,
+            description="Tito only. Timeout in milliseconds for the TITO_DECIDE calls, overall and per flag. "
+            "A timeout falls back to the regex for that flag.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -8211,6 +8230,7 @@ class Pipe:
 
             tool_loop_iteration = 0
             vn_reminder_state = None
+            tito_decide_state = None
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -8244,6 +8264,13 @@ class Pipe:
                     _diff_chat_id = __metadata__.get("chat_id") if __metadata__ else None
                     self._log_message_hash_diff(_diff_chat_id, payload_for_stream)
 
+                    if (
+                        self.TITO_ACTIVE.get()
+                        and tool_loop_iteration == 1
+                        and not is_internal
+                        and tito_decide_state is None
+                    ):
+                        tito_decide_state = self._tito_decide_start(payload_for_stream)
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
                         vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream)
 
@@ -9202,6 +9229,10 @@ class Pipe:
                 final_message.append(marker_text)
                 logger.debug("Persisted %d metadata marker char(s)", len(marker_text))
 
+        if tito_decide_state is not None and not is_internal:
+            await self._tito_decide_collect(tito_decide_state)
+            tito_decide_state = None
+
         if not is_internal:
             try:
                 await self._tito_output_guard(
@@ -9793,6 +9824,179 @@ class Pipe:
                     if isinstance(state["original"], str):
                         msg["content"] = state["original"]
                     return
+
+    TITO_DECIDE_URL = "https://openrouter.ai/api/alpha/decisions"
+    TITO_DECIDE_MODEL = "microsoft/microsoft-decision-1"
+    TITO_DECIDE_FLAGS = {
+        "smart_consumer": {
+            "question": "Is the dad weighing a purchase, a sale, a price, a seller, a used item, or money paperwork (an official letter, a title, a bill), where a fair price range, the one or two things worth checking, or facts a seller might leave out would help him?",
+            "criteria": {"yes": "A buying, selling, price or money-paperwork situation",
+                         "no": "No purchase, price, seller or money paperwork involved"},
+        },
+        "needs_search": {
+            "question": "Does a good reply need anything LOCAL (Fresno, his bus, his job, nearby places or events), RECENT (prices, news, rules that change), or beyond common knowledge, so a quick web search would make it better?",
+            "criteria": {"yes": "A web search would improve the reply",
+                         "no": "The reply works fine from general knowledge or feelings alone"},
+        },
+        "ke_anh_nghe": {
+            "question": "Is the dad asking about a thing, a word, a place, history, politics, cars, or Vietnam, where a short interesting background fact or story would add value?",
+            "criteria": {"yes": "A short background fact or story would add value",
+                         "no": "A background story would not add value here"},
+        },
+    }
+
+    TITO_DECIDE_REGEX = {
+        "smart_consumer": r"\b(giá|đô|bán|mua|title|tiền|thuế|IRS|marketplace)\b",
+        "needs_search": r"\b(bao nhiêu|ở đâu|mới|bây giờ|Fresno|tin)\b",
+        "ke_anh_nghe": r"\b(là gì|là sao|vì sao|thiệt không)\b",
+    }
+
+    TITO_DECIDE_LOG_NAMES = (
+        ("smart_consumer", "sc"),
+        ("needs_search", "search"),
+        ("ke_anh_nghe", "story"),
+    )
+
+    def _tito_decide_key(self) -> str:
+        try:
+            raw = getattr(self.valves, "TITO_DECIDE_KEY", "") or ""
+            return decrypt_valve_secret(raw).strip()
+        except Exception:
+            return ""
+
+    def _tito_decide_enabled(self) -> bool:
+        return bool(getattr(self.valves, "TITO_DECIDE", False)) and bool(self._tito_decide_key())
+
+    @classmethod
+    def _tito_decide_post(cls, api_key: str, text: str, flag: str, timeout_s: float) -> float:
+        import json as _json
+        import urllib.request as _ur
+
+        body = {
+            "model": cls.TITO_DECIDE_MODEL,
+            "state": text,
+            "questions": {flag: {"type": "choice", **cls.TITO_DECIDE_FLAGS[flag]}},
+        }
+        req = _ur.Request(
+            cls.TITO_DECIDE_URL,
+            data=_json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+            },
+        )
+        with _ur.urlopen(req, timeout=timeout_s) as resp:
+            data = _json.loads(resp.read())
+        prob = float(data["answers"][flag]["probabilities"]["yes"])
+        if not 0.0 <= prob <= 1.0:
+            raise ValueError("probability out of range")
+        return prob
+
+    @classmethod
+    def _tito_decide_regex(cls, text: str, flag: str) -> float:
+        import re as _re
+        import unicodedata as _ud
+
+        norm = _ud.normalize("NFC", text or "")
+        return 1.0 if _re.search(cls.TITO_DECIDE_REGEX[flag], norm, _re.IGNORECASE) else 0.0
+
+    async def _tito_decide_shadow(self, text: str):
+        import asyncio as _aio
+
+        try:
+            timeout_s = max(0.1, int(getattr(self.valves, "TITO_DECIDE_TIMEOUT_MS", 1500) or 1500) / 1000)
+            key = self._tito_decide_key()
+            results: dict = {}
+
+            async def one(flag: str) -> None:
+                if key:
+                    try:
+                        prob = await _aio.wait_for(
+                            _aio.to_thread(self._tito_decide_post, key, text, flag, timeout_s),
+                            timeout_s,
+                        )
+                        results[flag] = {"p": prob, "src": "msd"}
+                        return
+                    except Exception:
+
+                        pass
+                results[flag] = {"p": self._tito_decide_regex(text, flag), "src": "regex"}
+
+            tasks = [_aio.ensure_future(one(flag)) for flag in self.TITO_DECIDE_FLAGS]
+            try:
+                await _aio.wait(tasks, timeout=timeout_s)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+            out = {}
+            for flag in self.TITO_DECIDE_FLAGS:
+                out[flag] = results.get(flag) or {
+                    "p": self._tito_decide_regex(text, flag),
+                    "src": "regex",
+                }
+            return out
+        except Exception as exc:
+            logger.info("[TITO] decide failed err=%s", type(exc).__name__)
+            return None
+
+    @staticmethod
+    def _tito_decide_last_user_text(payload: dict) -> str:
+        messages = (payload or {}).get("messages") or []
+        for msg in reversed(messages):
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "\n".join(
+                    str(b.get("text", ""))
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            return ""
+        return ""
+
+    def _tito_decide_start(self, payload: dict):
+        import asyncio as _aio
+
+        try:
+            if not self._tito_decide_enabled():
+                return None
+            text = self._tito_decide_last_user_text(payload)
+            if not text.strip():
+                return None
+            return (_aio.ensure_future(self._tito_decide_shadow(text)), time.monotonic())
+        except Exception as exc:
+            logger.info("[TITO] decide start failed err=%s", type(exc).__name__)
+            return None
+
+    async def _tito_decide_collect(self, state) -> None:
+        import asyncio as _aio
+
+        try:
+            task, t0 = state
+            timeout_s = max(0.1, int(getattr(self.valves, "TITO_DECIDE_TIMEOUT_MS", 1500) or 1500) / 1000)
+            try:
+                result = await _aio.wait_for(task, timeout_s)
+            except _aio.TimeoutError:
+                task.cancel()
+                ms = int((time.monotonic() - t0) * 1000)
+                logger.info("[TITO] decide outcome=timeout ms=%d", ms)
+                return
+            ms = int((time.monotonic() - t0) * 1000)
+            if not result:
+                logger.info("[TITO] decide outcome=none ms=%d", ms)
+                return
+            parts = []
+            for flag, short in self.TITO_DECIDE_LOG_NAMES:
+                item = result.get(flag) or {}
+                parts.append(f"{short}={float(item.get('p', 0.0)):.2f}({item.get('src', 'regex')})")
+            logger.info("[TITO] decide %s ms=%d", " ".join(parts), ms)
+        except Exception as exc:
+            logger.info("[TITO] decide collect failed err=%s", type(exc).__name__)
 
     def _tito_shrink_images(self, payload: dict) -> dict:
         max_px = int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0)
