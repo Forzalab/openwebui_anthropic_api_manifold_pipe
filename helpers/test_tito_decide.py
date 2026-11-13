@@ -1,10 +1,13 @@
 """Self-check for Tito's decide shadow (valve TITO_DECIDE, default off).
 
-Per Tito turn, three MSD-1 flags are scored over HTTP and LOGGED ONLY. Checks:
-the valve off makes no call; a successful run parses probabilities.yes and logs
-one ``[TITO] decide`` line in the agreed format; one failing flag falls back to
-the Vietnamese keyword regex for that flag only; a timeout fails open with no
-exception; the API key and the message text never reach a log record.
+Per Tito turn, four input MSD-1 flags are scored over HTTP and LOGGED ONLY, and
+the pure_vn output check runs on the visible reply. Checks: the valve off makes no
+call; a successful run parses probabilities.yes and logs one ``[TITO] decide`` line
+in the agreed format; one failing flag falls back to the Vietnamese keyword regex
+for that flag only; a timeout fails open with no exception; the casual_chat regex
+fallback works both ways; the output check logs one ``[TITO] decide_out`` line and
+fails open; TITO_DECIDE_INJECT adds one block after the cache breakpoint only when
+on, and nothing on timeout; the API key and the message text never reach a log.
 
 HTTP is mocked by replacing ``urllib.request.urlopen``. Runs without OpenWebUI,
 without the anthropic SDK and without network access.
@@ -29,10 +32,18 @@ from types import SimpleNamespace
 SRC = Path(__file__).resolve().parents[1] / "src" / "anthropic_pipe"
 KEY = "sk-or-TEST-KEY-DO-NOT-LOG-123456"
 MESSAGE = "SECRET-MESSAGE-TEXT giá xe này bao nhiêu"
+REPLY = "SECRET-REPLY-TEXT Tito chào anh, giá tốt đó."
+META = {"model": {"id": "tito"}}
 LOG_LINE = re.compile(
     r"^\[TITO\] decide sc=\d\.\d\d\((msd|regex)\) search=\d\.\d\d\((msd|regex)\) "
-    r"story=\d\.\d\d\((msd|regex)\) ms=\d+$"
+    r"story=\d\.\d\d\((msd|regex)\) casual=\d\.\d\d\((msd|regex)\) ms=\d+$"
 )
+OUT_LINE = re.compile(
+    r"^\[TITO\] decide_out (pure_vn=\d\.\d\d\(msd\)|pure_vn=-\(none\)) "
+    r"guard_trigger=\S+ ms=\d+$"
+)
+ALL_SCORES = {"smart_consumer": 0.97, "needs_search": 0.41, "ke_anh_nghe": 0.12,
+              "casual_chat": 0.9, "pure_vn": 0.02}
 
 
 def _load(name: str, path: Path):
@@ -43,7 +54,11 @@ def _load(name: str, path: Path):
     return module
 
 
+GUARD = _load("_tito_guard_for_decide", SRC / "response" / "tito_guard.py")
 TITO = _load("_tito_decide_under_test", SRC / "tito.py")
+# In the compiled artifact these live in the same module scope.
+TITO.split_visible = GUARD.split_visible
+TITO.visible_text = GUARD.visible_text
 # decrypt_valve_secret lives in the template; the compiled pipe has it in the same
 # namespace. Here the test key is plaintext, so identity is enough.
 TITO.decrypt_valve_secret = lambda value: str(value)
@@ -56,6 +71,8 @@ class FakePipe(TITO.PipeTitoMethods):
             TITO_DECIDE=valves.get("TITO_DECIDE", True),
             TITO_DECIDE_KEY=valves.get("TITO_DECIDE_KEY", KEY),
             TITO_DECIDE_TIMEOUT_MS=valves.get("TITO_DECIDE_TIMEOUT_MS", 1500),
+            TITO_DECIDE_INJECT=valves.get("TITO_DECIDE_INJECT", False),
+            TITO_VN_REMINDER=valves.get("TITO_VN_REMINDER", ""),
         )
 
 
@@ -103,7 +120,7 @@ def install_urlopen(scores: dict, fail: set = frozenset(), sleep_s: float = 0.0)
     return calls
 
 
-ELAPSED = {"collect": 0.0}
+ELAPSED = {"collect": 0.0, "out": 0.0, "inject": 0.0}
 
 
 def run_turn(pipe, text: str, capture: Capture):
@@ -124,10 +141,46 @@ def run_turn(pipe, text: str, capture: Capture):
     return asyncio.run(go())
 
 
+def run_out(pipe, reply: str, capture: Capture, guard_trigger: str = "none"):
+    """Start the pure_vn check, then collect it after a (pretend) guard, as the orchestrator does."""
+    async def go():
+        ctx = SimpleNamespace(text=lambda: reply)
+        state = pipe._tito_decide_out_start(ctx, META)
+        if state is not None:
+            t0 = time.monotonic()
+            await pipe._tito_decide_out_collect(state, guard_trigger)
+            ELAPSED["out"] = time.monotonic() - t0
+        return state
+
+    capture.messages.clear()
+    return asyncio.run(go())
+
+
 def attach(capture: Capture):
     TITO.logger.handlers = [capture]
     TITO.logger.setLevel(logging.DEBUG)
     TITO.logger.propagate = False
+
+
+def _payload_with_breakpoint() -> dict:
+    return {"messages": [
+        {"role": "user", "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]},
+        {"role": "assistant", "content": "chào"},
+        {"role": "user", "content": MESSAGE},
+    ]}
+
+
+async def _start_and_inject(pipe, payload):
+    """Start the input decide and, when INJECT is on, await it, all inside one loop."""
+    state = pipe._tito_decide_start(payload)
+    if state is None:
+        return False, ""
+    if pipe._tito_decide_inject_on():
+        t0 = time.monotonic()
+        text = await pipe._tito_decide_inject(state)
+        ELAPSED["inject"] = time.monotonic() - t0
+        return True, text
+    return True, ""
 
 
 def main() -> int:
@@ -149,10 +202,10 @@ def main() -> int:
         assert state is None and calls == [], "empty key must not call"
 
         # 2. Success: parsed probabilities, one line in the agreed format, right request shape.
-        calls = install_urlopen({"smart_consumer": 0.97, "needs_search": 0.41, "ke_anh_nghe": 0.12})
+        calls = install_urlopen(ALL_SCORES)
         pipe = FakePipe()
         run_turn(pipe, MESSAGE, capture)
-        assert len(calls) == 3, f"expected 3 calls, got {len(calls)}"
+        assert len(calls) == 4, f"expected 4 calls, got {len(calls)}"
         assert {c["flag"] for c in calls} == set(TITO.PipeTitoMethods.TITO_DECIDE_FLAGS)
         assert all(c["auth"] == "Bearer " + KEY for c in calls), "auth header wrong"
         assert all(c["url"] == "https://openrouter.ai/api/alpha/decisions" for c in calls)
@@ -162,10 +215,10 @@ def main() -> int:
         assert len(decide) == 1, f"expected one decide line, got {decide}"
         assert LOG_LINE.match(decide[0]), f"bad log format: {decide[0]}"
         assert "sc=0.97(msd)" in decide[0] and "search=0.41(msd)" in decide[0] and "story=0.12(msd)" in decide[0], decide[0]
+        assert "casual=0.90(msd)" in decide[0], decide[0]
 
         # 3. One flag fails: regex fallback for that flag only, marked regex.
-        calls = install_urlopen({"smart_consumer": 0.97, "needs_search": 0.41, "ke_anh_nghe": 0.12},
-                                fail={"needs_search"})
+        calls = install_urlopen(ALL_SCORES, fail={"needs_search"})
         pipe = FakePipe()
         result_state = run_turn(pipe, MESSAGE, capture)
         decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
@@ -173,6 +226,7 @@ def main() -> int:
         assert "sc=0.97(msd)" in decide[0], decide[0]
         assert "search=1.00(regex)" in decide[0], decide[0]  # "bao nhiêu" hits the regex
         assert "story=0.12(msd)" in decide[0], decide[0]
+        assert "casual=0.90(msd)" in decide[0], decide[0]
         assert result_state is not None
 
         # 3b. Regex directly: keyword hits and misses.
@@ -180,10 +234,16 @@ def main() -> int:
         assert TITO.PipeTitoMethods._tito_decide_regex("Chào buổi sáng", "smart_consumer") == 0.0
         assert TITO.PipeTitoMethods._tito_decide_regex("Thiệt không vậy?", "ke_anh_nghe") == 1.0
         assert TITO.PipeTitoMethods._tito_decide_regex("đôi giày mới", "smart_consumer") == 0.0  # "đô" inside "đôi"
+        # casual_chat regex: no "?" and no question word = 1.0; a question word or "?" = 0.0.
+        casual = TITO.PipeTitoMethods._tito_decide_regex
+        assert casual("Hôm nay tôi mệt quá", "casual_chat") == 1.0
+        assert casual("Hôm nay mệt quá không?", "casual_chat") == 0.0
+        assert casual("Cái này bao nhiêu", "casual_chat") == 0.0
+        assert casual("Chuyện này là gì vậy", "casual_chat") == 0.0
 
         # 4. Timeout: the calls outlive TITO_DECIDE_TIMEOUT_MS. Fails open, no exception,
         #    a regex line is still logged, and the call returns in about the timeout.
-        install_urlopen({"smart_consumer": 0.97, "needs_search": 0.41, "ke_anh_nghe": 0.12}, sleep_s=1.0)
+        install_urlopen(ALL_SCORES, sleep_s=1.0)
         pipe = FakePipe(TITO_DECIDE_TIMEOUT_MS=150)
         try:
             run_turn(pipe, MESSAGE, capture)
@@ -196,8 +256,7 @@ def main() -> int:
         assert "(msd)" not in decide[0], f"timed-out flags must not be msd: {decide[0]}"
 
         # 5. Key and message text never reach a log record (including the failure path).
-        install_urlopen({"smart_consumer": 0.97, "needs_search": 0.41, "ke_anh_nghe": 0.12},
-                        fail={"smart_consumer", "needs_search", "ke_anh_nghe"})
+        install_urlopen(ALL_SCORES, fail={"smart_consumer", "needs_search", "ke_anh_nghe", "casual_chat", "pure_vn"})
         pipe = FakePipe()
         run_turn(pipe, MESSAGE, capture)
         joined = "\n".join(capture.messages)
@@ -206,6 +265,84 @@ def main() -> int:
         assert "upstream refused" not in joined, "exception text leaked into logs"
         decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
         assert len(decide) == 1 and "sc=-" not in decide[0] and "(regex)" in decide[0], decide
+
+        # 6. Output check: valve off makes no call and logs nothing.
+        calls = install_urlopen(ALL_SCORES)
+        state = run_out(FakePipe(TITO_DECIDE=False), REPLY, capture)
+        assert state is None and calls == [], "valve off made an output call"
+        assert not any("decide_out" in m for m in capture.messages), "valve off logged decide_out"
+
+        # 6b. Non-Tito model: no output call.
+        calls = install_urlopen(ALL_SCORES)
+        ctx = SimpleNamespace(text=lambda: REPLY)
+        assert FakePipe()._tito_decide_out_start(ctx, {"model": {"id": "claude-opus-5-5"}}) is None
+        assert calls == [], "non-tito made an output call"
+
+        # 6c. Success: one pure_vn call with the visible reply, one decide_out line.
+        calls = install_urlopen(ALL_SCORES)
+        run_out(FakePipe(), REPLY, capture, guard_trigger="english_sentence")
+        out = [m for m in capture.messages if m.startswith("[TITO] decide_out")]
+        assert len(out) == 1 and OUT_LINE.match(out[0]), out
+        assert "pure_vn=0.02(msd)" in out[0] and "guard_trigger=english_sentence" in out[0], out[0]
+        assert [c["flag"] for c in calls] == ["pure_vn"], calls
+        assert calls[0]["state"] == REPLY and calls[0]["model"] == "microsoft/microsoft-decision-1"
+        assert not any("SECRET-REPLY-TEXT" in m for m in capture.messages), "reply text logged"
+
+        # 6d. Timeout: fails open, src=none, bounded by the timeout.
+        install_urlopen(ALL_SCORES, sleep_s=1.0)
+        run_out(FakePipe(TITO_DECIDE_TIMEOUT_MS=150), REPLY, capture)
+        assert ELAPSED["out"] < 0.6, f"output timeout did not bound the wait: {ELAPSED['out']:.2f}s"
+        out = [m for m in capture.messages if m.startswith("[TITO] decide_out")]
+        assert len(out) == 1 and "pure_vn=-(none)" in out[0] and OUT_LINE.match(out[0]), out
+
+        # 7. INJECT off: the input decide runs in parallel, no block is added to the VN slot.
+        TITO.PipeTitoMethods.TITO_ACTIVE.set(True)
+        payload = _payload_with_breakpoint()
+        install_urlopen(ALL_SCORES)
+        pipe = FakePipe(TITO_DECIDE_INJECT=False, TITO_VN_REMINDER="")
+        started, inject = asyncio.run(_start_and_inject(pipe, payload))
+        assert started and inject == "", "inject off must start the shadow and add no text"
+        assert pipe._tito_vn_reminder_apply(payload, inject) is None, "inject off added a block"
+        assert payload["messages"][2]["content"] == MESSAGE
+
+        # 8. INJECT on: the block lands after the breakpoint with the lines of passing flags.
+        payload = _payload_with_breakpoint()
+        install_urlopen(ALL_SCORES)
+        pipe = FakePipe(TITO_DECIDE_INJECT=True, TITO_VN_REMINDER="")
+        started, inject = asyncio.run(_start_and_inject(pipe, payload))
+        expected = "\n\n".join([
+            TITO.PipeTitoMethods.TITO_DECIDE_INJECT_LINES["smart_consumer"],
+            TITO.PipeTitoMethods.TITO_DECIDE_INJECT_LINES["needs_search"],
+            TITO.PipeTitoMethods.TITO_DECIDE_INJECT_LINES["casual_chat"],
+        ])
+        assert inject == expected, f"wrong inject text: {inject[:80]!r}"
+        assert "anh is curious" not in inject, "ke_anh_nghe below threshold must not inject"
+        state_vn = pipe._tito_vn_reminder_apply(payload, inject)
+        assert state_vn is not None
+        last = payload["messages"][2]["content"]
+        assert last[0] == {"type": "text", "text": MESSAGE} and last[1]["text"] == expected, "block not on last user turn"
+        assert payload["messages"][0]["content"][0].get("cache_control"), "breakpoint moved"
+        pipe._tito_vn_reminder_remove(payload, state_vn)
+        assert payload["messages"][2]["content"] == MESSAGE, "block not removed"
+        decide = [m for m in capture.messages if m.startswith("[TITO] decide_inject flags=")]
+        assert decide and decide[-1].endswith("smart_consumer,needs_search,casual_chat"), decide
+
+        # 8b. INJECT on with the regex fallback only (MSD fails): no lines, reply proceeds.
+        install_urlopen(ALL_SCORES, fail={"smart_consumer", "needs_search", "ke_anh_nghe", "casual_chat"})
+        pipe = FakePipe(TITO_DECIDE_INJECT=True)
+        _, inject = asyncio.run(_start_and_inject(pipe, _payload_with_breakpoint()))
+        assert inject == "", f"regex fallback injected: {inject!r}"
+
+        # 9. INJECT on, timeout: no block, returns within the timeout, reply proceeds.
+        install_urlopen(ALL_SCORES, sleep_s=1.0)
+        pipe = FakePipe(TITO_DECIDE_INJECT=True, TITO_DECIDE_TIMEOUT_MS=150)
+        payload = _payload_with_breakpoint()
+        t0 = time.monotonic()
+        _, inject = asyncio.run(_start_and_inject(pipe, payload))
+        assert ELAPSED["inject"] < 0.6, f"inject timeout did not bound the wait: {ELAPSED['inject']:.2f}s"
+        assert inject == "", "timeout injected a block"
+        assert pipe._tito_vn_reminder_apply(payload, inject) is None, "timeout added a block"
+        assert "decide_inject outcome=timeout" in "\n".join(capture.messages)
     finally:
         urllib.request.urlopen = real_urlopen
 

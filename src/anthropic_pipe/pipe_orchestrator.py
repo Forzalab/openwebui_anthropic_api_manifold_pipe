@@ -360,6 +360,7 @@ class PipeOrchestratorMethods:
             tool_loop_iteration = 0
             vn_reminder_state = None  # Tito VN reminder, iteration 1 only
             tito_decide_state = None  # Tito decide shadow (TITO_DECIDE), iteration 1 only
+            tito_inject_text = ""  # Tito decide INJECT block (TITO_DECIDE_INJECT), iteration 1 only
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -408,8 +409,13 @@ class PipeOrchestratorMethods:
                         and tito_decide_state is None
                     ):
                         tito_decide_state = self._tito_decide_start(payload_for_stream)
+                        if tito_decide_state is not None and self._tito_decide_inject_on():
+                            # INJECT: the input result is awaited here, before the main call,
+                            # and its lines join the VN reminder slot. Never raises.
+                            tito_inject_text = await self._tito_decide_inject(tito_decide_state)
+                            tito_decide_state = None
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
-                        vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream)
+                        vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream, tito_inject_text)
                     # Dump the full (stripped) outgoing payload so we can audit
                     # cache_control placement, tool list, message order and byte
                     # drift across turns without logging megabytes of base64.
@@ -1584,21 +1590,22 @@ class PipeOrchestratorMethods:
         # the visible prose; on an accepted edit emit_replace resets the
         # accumulation, so the authoritative replace below and the returned text
         # both carry the edited version. Never blocks or fails the reply.
-        # Tito decide shadow: collect the task started before the stream and log one line.
+        # Tito decide shadow (TITO_DECIDE): the pure_vn output check starts right
+        # before the guard, runs beside it, and is collected after it. The input
+        # line is collected after the guard too, so the guard never waits on decide.
         # Bounded by TITO_DECIDE_TIMEOUT_MS; never changes the reply.
-        if tito_decide_state is not None and not is_internal:
-            await self._tito_decide_collect(tito_decide_state)
-            tito_decide_state = None
-
+        guard_trigger = "none"
+        tito_out_state = None
         if not is_internal:
+            tito_out_state = self._tito_decide_out_start(request_ctx, __metadata__)
             try:
-                await self._tito_output_guard(
+                guard_trigger = await self._tito_output_guard(
                     request_ctx,
                     client,
                     __metadata__,
                     total_usage=total_usage if include_usage else None,
                     pricing=self._model_pricing(),
-                )
+                ) or "none"
             except Exception as _guard_err:
                 logger.warning(
                     "[TITO] output guard failed (keeping reply): %s", _guard_err
@@ -1607,6 +1614,11 @@ class PipeOrchestratorMethods:
                 _guard_t0 = request_ctx.timing.pop("guard_t0", None)
                 if _guard_t0 is not None:
                     request_ctx.timing["guard"] = time.monotonic() - _guard_t0
+        if tito_decide_state is not None and not is_internal:
+            await self._tito_decide_collect(tito_decide_state)
+            tito_decide_state = None
+        if tito_out_state is not None:
+            await self._tito_decide_out_collect(tito_out_state, guard_trigger)
 
         consolidated = final_text()
         # The authoritative content this run hands to OpenWebUI. Comparing the
