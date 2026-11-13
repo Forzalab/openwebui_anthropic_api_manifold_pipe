@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.5
+version: 0.11.6
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.6
+- Tito decide shadow: new input flag `casual_chat` (casual chat about his day or feelings vs. a request for information, advice or a decision; prompt has chat and ask examples; no regex fallback, MSD failure gives no score). New output check `pure_vn` on the visible reply (fully natural Vietnamese, English only for names, brands, short terms and URLs), started with the output guard and logged as one `[TITO] decide_out` line with the guard trigger. Valve `TITO_DECIDE_INJECT` (default off): when on, the input flags are awaited before the main call and the lines of MSD-scored flags above threshold are added as one block in the VN reminder slot. Log only otherwise; fails open.
+
 v0.11.5
 - Tito output guard: Vietnamese-only rule (rule 10: English kept only for names, brands, short terms, URLs and one short English line with its Vietnamese meaning), new trigger `english_sentence` (5+ consecutive English words with 2+ English function words, outside URLs, code, links and quotes of 12 words or fewer; common unaccented Vietnamese words break a run), list items judged one by one (over 3 sentences = long_paragraph), and multiple_questions ignores a short quoted English line.
 
@@ -1058,8 +1061,8 @@ class Pipe:
         )
         TITO_DECIDE: bool = Field(
             default=False,
-            description="Tito only. Shadow mode: per turn, score three flags with OpenRouter MSD-1 and log "
-            "one [TITO] decide line. No effect on the reply. Off = no call.",
+            description="Tito only. Shadow mode: per turn, score the input flags and the pure_vn output "
+            "check with OpenRouter MSD-1 and log [TITO] decide lines. No effect on the reply. Off = no call.",
         )
         TITO_DECIDE_KEY: EncryptedStr = Field(
             default="",
@@ -1071,6 +1074,12 @@ class Pipe:
             ge=100,
             description="Tito only. Timeout in milliseconds for the TITO_DECIDE calls, overall and per flag. "
             "A timeout falls back to the regex for that flag.",
+        )
+        TITO_DECIDE_INJECT: bool = Field(
+            default=False,
+            description="Tito only. Needs TITO_DECIDE. Awaits the input flags before the main call (up to "
+            "TITO_DECIDE_TIMEOUT_MS) and adds one line per flag that passes its threshold to the per-turn "
+            "block, after the cache breakpoints. Timeout or regex fallback adds nothing. Off = log only.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,

@@ -83,7 +83,7 @@ class PipeTitoMethods:
 
     async def _tito_output_guard(
         self, request_ctx, client, metadata, total_usage=None, pricing=None
-    ) -> None:
+    ) -> str:
         """Check Tito's visible reply with Haiku and replace it once if needed.
 
         Only visible prose is sent; ``<details>`` blocks, ``[anthropic-hidden-]``
@@ -99,9 +99,9 @@ class PipeTitoMethods:
         persisted); a missing usage or rate card adds nothing.
         """
         if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
-            return
+            return "none"
         if not self._is_tito(metadata):
-            return
+            return "none"
         timing = getattr(request_ctx, "timing", None)
         if timing is not None:
             timing["guard_t0"] = time.monotonic()
@@ -156,6 +156,7 @@ class PipeTitoMethods:
             len(visible),
             rebuilt_len,
         )
+        return trigger
 
     def _tito_config(self) -> dict:
         """Return the frozen Tito config (a shallow copy to avoid in-place edits)."""
@@ -518,7 +519,7 @@ class PipeTitoMethods:
             )
         state[chat_id] = (tools_sha, system_sha)
 
-    def _tito_vn_reminder_apply(self, payload: dict):
+    def _tito_vn_reminder_apply(self, payload: dict, extra_text: str = ""):
         """Append the Tito per-turn VN reminder after the cache breakpoints.
 
         Called only for Tito, tool-loop iteration 1, after ``_apply_cache_control``.
@@ -533,6 +534,8 @@ class PipeTitoMethods:
         if _tito_cv is None or not _tito_cv.get():
             return None
         text = str(getattr(self.valves, "TITO_VN_REMINDER", "") or "").strip()
+        extra = (extra_text or "").strip()
+        text = "\n\n".join(part for part in (text, extra) if part)
         if not text:
             return None
         try:
@@ -585,7 +588,9 @@ class PipeTitoMethods:
                         msg["content"] = state["original"]
                     return
 
-    # TITO_DECIDE (shadow mode): three MSD-1 yes/no flags per turn, logged only.
+    # TITO_DECIDE (shadow mode): MSD-1 yes/no flags per turn, logged only.
+    # TITO_DECIDE_FLAGS are input flags (scored in parallel on the last user message);
+    # TITO_DECIDE_OUT_FLAGS is the output check on Tito's visible reply.
     TITO_DECIDE_URL = "https://openrouter.ai/api/alpha/decisions"
     TITO_DECIDE_MODEL = "microsoft/microsoft-decision-1"
     TITO_DECIDE_FLAGS = {
@@ -604,18 +609,44 @@ class PipeTitoMethods:
             "criteria": {"yes": "A short background fact or story would add value",
                          "no": "A background story would not add value here"},
         },
+        "casual_chat": {
+            "question": "Is the dad just chatting about his day or his feelings, rather than asking for information, advice, or a decision? Chatting examples: 'Nay khách sạn đông quá', 'Hôm qua tôi nấu canh chua', 'Mấy bữa nay trời lạnh'. Asking examples: 'Thuốc này uống mấy viên vây!?', 'Chỗ nào bán phở ngon gần nhà?', 'Cái này tiếng Anh nói sao?'",
+            "criteria": {"yes": "Casual chat about his day or feelings",
+                         "no": "Asking for information, advice, or a decision"},
+        },
+    }
+    # Output check: is Tito's visible reply fully natural Vietnamese? No regex fallback.
+    TITO_DECIDE_OUT_FLAGS = {
+        "pure_vn": {
+            "question": "Is this reply written fully in natural everyday Vietnamese? English is fine only for names, brands, model names, short terms like title or smog, and URLs. Whole English sentences or English quotes make it NOT pure.",
+            "criteria": {"yes": "Fully natural Vietnamese apart from names, brands and short terms",
+                         "no": "Contains English sentences or quotes, or reads like a translation"},
+        },
     }
     # Regex fallback per flag (Vietnamese keywords, case-insensitive, NFC text).
+    # casual_chat has no regex fallback: on MSD failure it gets no score (src=none).
     TITO_DECIDE_REGEX = {
         "smart_consumer": r"\b(giá|đô|bán|mua|title|tiền|thuế|IRS|marketplace)\b",
         "needs_search": r"\b(bao nhiêu|ở đâu|mới|bây giờ|Fresno|tin)\b",
         "ke_anh_nghe": r"\b(là gì|là sao|vì sao|thiệt không)\b",
     }
+    # INJECT mode (valve TITO_DECIDE_INJECT): MSD-scored flags at or above these
+    # thresholds add one line to the per-turn block. casual_chat always adds one
+    # of two lines (chat or question), split at its threshold.
+    TITO_DECIDE_INJECT_MIN = {"smart_consumer": 0.5, "needs_search": 0.25, "ke_anh_nghe": 0.5}
+    TITO_DECIDE_INJECT_LINES = {
+        "smart_consumer": "anh is weighing a purchase. Tito is the friend who knows prices: a fair range first, the one or two things worth checking, and an English line anh can say to bargain, laid out so anh can scan it on his phone, in everyday words. The choice stays anh's.",
+        "needs_search": "anh's question touches something local, recent, or past what everyone already knows. Tito looks it up first, then talks like someone who just checked.",
+        "ke_anh_nghe": "anh is curious about where this thing comes from. Tito keeps one small, true story about it in his pocket and shares it after the answer.",
+        "casual_chat": "anh is sharing about his day. A good friend hears the specific thing anh said and echoes it back warmly, sometimes with a gentle guess at how it felt (\"chắc anh cũng…\"), brings in what anh shared before, stays curious about one detail (a place, a smell, a meal, a person), and asks one easy question about it. Half-answers are fine. When anh brings up the old days, the friend walks there with him, then back to today.",
+    }
+    TITO_DECIDE_CASUAL_NO_LINE = "anh is asking about something he wants to know."
     # Log line order and short names: sc=smart_consumer, search=needs_search, story=ke_anh_nghe.
     TITO_DECIDE_LOG_NAMES = (
         ("smart_consumer", "sc"),
         ("needs_search", "search"),
         ("ke_anh_nghe", "story"),
+        ("casual_chat", "casual"),
     )
 
     def _tito_decide_key(self) -> str:
@@ -636,10 +667,11 @@ class PipeTitoMethods:
         import json as _json
         import urllib.request as _ur
 
+        spec = {**cls.TITO_DECIDE_FLAGS, **cls.TITO_DECIDE_OUT_FLAGS}
         body = {
             "model": cls.TITO_DECIDE_MODEL,
             "state": text,
-            "questions": {flag: {"type": "choice", **cls.TITO_DECIDE_FLAGS[flag]}},
+            "questions": {flag: {"type": "choice", **spec[flag]}},
         }
         req = _ur.Request(
             cls.TITO_DECIDE_URL,
@@ -665,6 +697,13 @@ class PipeTitoMethods:
 
         norm = _ud.normalize("NFC", text or "")
         return 1.0 if _re.search(cls.TITO_DECIDE_REGEX[flag], norm, _re.IGNORECASE) else 0.0
+
+    @classmethod
+    def _tito_decide_fallback(cls, text: str, flag: str) -> dict:
+        """Score for a flag whose MSD call failed. casual_chat gets no score (src=none)."""
+        if flag == "casual_chat":
+            return {"p": 0.0, "src": "none"}
+        return {"p": cls._tito_decide_regex(text, flag), "src": "regex"}
 
     async def _tito_decide_shadow(self, text: str):
         """Score the three flags for ``text``. Never raises.
@@ -692,7 +731,7 @@ class PipeTitoMethods:
                     except Exception:
                         # Silent on purpose: the one decide line shows src=regex for this flag.
                         pass
-                results[flag] = {"p": self._tito_decide_regex(text, flag), "src": "regex"}
+                results[flag] = self._tito_decide_fallback(text, flag)
 
             tasks = [_aio.ensure_future(one(flag)) for flag in self.TITO_DECIDE_FLAGS]
             try:
@@ -703,10 +742,7 @@ class PipeTitoMethods:
                         task.cancel()
             out = {}
             for flag in self.TITO_DECIDE_FLAGS:
-                out[flag] = results.get(flag) or {
-                    "p": self._tito_decide_regex(text, flag),
-                    "src": "regex",
-                }
+                out[flag] = results.get(flag) or self._tito_decide_fallback(text, flag)
             return out
         except Exception as exc:
             logger.info("[TITO] decide failed err=%s", type(exc).__name__)
@@ -768,16 +804,126 @@ class PipeTitoMethods:
                 logger.info("[TITO] decide outcome=timeout ms=%d", ms)
                 return
             ms = int((time.monotonic() - t0) * 1000)
-            if not result:
-                logger.info("[TITO] decide outcome=none ms=%d", ms)
-                return
-            parts = []
-            for flag, short in self.TITO_DECIDE_LOG_NAMES:
-                item = result.get(flag) or {}
-                parts.append(f"{short}={float(item.get('p', 0.0)):.2f}({item.get('src', 'regex')})")
-            logger.info("[TITO] decide %s ms=%d", " ".join(parts), ms)
+            self._tito_decide_log(result, ms)
         except Exception as exc:
             logger.info("[TITO] decide collect failed err=%s", type(exc).__name__)
+
+    def _tito_decide_log(self, result, ms: int) -> None:
+        """The one [TITO] decide line (input flags). Scores and sources only. Never raises."""
+        if not result:
+            logger.info("[TITO] decide outcome=none ms=%d", ms)
+            return
+        parts = []
+        for flag, short in self.TITO_DECIDE_LOG_NAMES:
+            item = result.get(flag) or {}
+            parts.append(f"{short}={float(item.get('p', 0.0)):.2f}({item.get('src', 'regex')})")
+        logger.info("[TITO] decide %s ms=%d", " ".join(parts), ms)
+
+    def _tito_decide_timeout_s(self) -> float:
+        return max(0.1, int(getattr(self.valves, "TITO_DECIDE_TIMEOUT_MS", 1500) or 1500) / 1000)
+
+    def _tito_decide_inject_on(self) -> bool:
+        """True when TITO_DECIDE_INJECT is on and the decide shadow is enabled."""
+        return bool(getattr(self.valves, "TITO_DECIDE_INJECT", False)) and self._tito_decide_enabled()
+
+    async def _tito_decide_inject(self, state) -> str:
+        """INJECT mode: await the input decide before the main call; return the block text or "".
+
+        Only MSD scores count: a regex fallback or a timeout gives no lines, so the
+        reply proceeds unchanged. Logs flag names only. Never raises.
+        """
+        import asyncio as _aio
+
+        try:
+            task, t0 = state
+            try:
+                result = await _aio.wait_for(task, self._tito_decide_timeout_s())
+            except _aio.TimeoutError:
+                task.cancel()
+                logger.info("[TITO] decide_inject outcome=timeout")
+                return ""
+            self._tito_decide_log(result, int((time.monotonic() - t0) * 1000))
+            if not result:
+                return ""
+            lines, names = [], []
+            for flag in self.TITO_DECIDE_FLAGS:
+                item = result.get(flag) or {}
+                if item.get("src") != "msd":
+                    continue
+                prob = float(item.get("p", 0.0))
+                if flag == "casual_chat":
+                    line = (self.TITO_DECIDE_INJECT_LINES[flag] if prob >= 0.5
+                            else self.TITO_DECIDE_CASUAL_NO_LINE)
+                elif prob >= self.TITO_DECIDE_INJECT_MIN[flag]:
+                    line = self.TITO_DECIDE_INJECT_LINES[flag]
+                else:
+                    continue
+                lines.append(line)
+                names.append(flag)
+            logger.info("[TITO] decide_inject flags=%s", ",".join(names) or "none")
+            return "\n\n".join(lines)
+        except Exception as exc:
+            logger.info("[TITO] decide_inject failed err=%s", type(exc).__name__)
+            return ""
+
+    def _tito_decide_out_start(self, request_ctx, metadata):
+        """Start the pure_vn check on Tito's visible reply. Returns (task, t0) or None.
+
+        Called right before the output guard, so both see the same pre-edit reply.
+        Never raises.
+        """
+        import asyncio as _aio
+
+        try:
+            if not self._tito_decide_enabled() or not self._is_tito(metadata):
+                return None
+            visible = visible_text(split_visible(request_ctx.text() or ""))
+            if not visible.strip():
+                return None
+            return (_aio.ensure_future(self._tito_decide_out_call(visible)), time.monotonic())
+        except Exception as exc:
+            logger.info("[TITO] decide_out start failed err=%s", type(exc).__name__)
+            return None
+
+    async def _tito_decide_out_call(self, text: str):
+        """One MSD-1 call for pure_vn; returns probabilities.yes or None. Never raises."""
+        import asyncio as _aio
+
+        try:
+            key = self._tito_decide_key()
+            if not key:
+                return None
+            timeout_s = self._tito_decide_timeout_s()
+            return await _aio.wait_for(
+                _aio.to_thread(self._tito_decide_post, key, text, "pure_vn", timeout_s),
+                timeout_s,
+            )
+        except Exception:
+            return None
+
+    async def _tito_decide_out_collect(self, state, guard_trigger: str) -> None:
+        """Await the pure_vn check, bounded from its start, and log one decide_out line.
+
+        Logs the score, source and guard trigger only (never text or the key).
+        A failure or timeout logs src=none. Never raises.
+        """
+        import asyncio as _aio
+
+        try:
+            task, t0 = state
+            remaining = max(0.001, self._tito_decide_timeout_s() - (time.monotonic() - t0))
+            prob = None
+            try:
+                prob = await _aio.wait_for(task, remaining)
+            except _aio.TimeoutError:
+                task.cancel()
+            except Exception:
+                prob = None
+            ms = int((time.monotonic() - t0) * 1000)
+            part = "pure_vn=-(none)" if prob is None else f"pure_vn={float(prob):.2f}(msd)"
+            logger.info("[TITO] decide_out %s guard_trigger=%s ms=%d", part, guard_trigger, ms)
+        except Exception as exc:
+            logger.info("[TITO] decide_out collect failed err=%s", type(exc).__name__)
 
     def _tito_shrink_images(self, payload: dict) -> dict:
         """Return a payload whose oversized base64 images are downscaled.
