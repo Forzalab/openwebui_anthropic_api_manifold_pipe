@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.8
+version: 0.11.9
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.9
+- Tito decide: when the `TITO_DECIDE_KEY` valve is empty, the key is read from env `TITO_DECIDE_KEY` (e.g. a compose `.env`). Valve still wins.
+
 v0.11.8
 - Tito decide: casual_chat question rewritten (scenario + literal-listener reading in its own instructions); held-out AUC .99 Jev / .86 MSD on 12 labeled messages.
 

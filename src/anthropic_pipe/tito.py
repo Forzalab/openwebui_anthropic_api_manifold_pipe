@@ -648,12 +648,13 @@ class PipeTitoMethods:
     )
 
     def _tito_decide_key(self) -> str:
-        """Plaintext TITO_DECIDE_KEY, or "" when unset or unreadable. Never logged."""
+        """Plaintext TITO_DECIDE_KEY: the valve, else env TITO_DECIDE_KEY, else "". Never logged."""
         try:
             raw = getattr(self.valves, "TITO_DECIDE_KEY", "") or ""
-            return decrypt_valve_secret(raw).strip()
+            key = decrypt_valve_secret(raw).strip()
         except Exception:
-            return ""
+            key = ""
+        return key or os.environ.get("TITO_DECIDE_KEY", "").strip()
 
     def _tito_decide_enabled(self) -> bool:
         """True when the valve is on and a key is configured."""

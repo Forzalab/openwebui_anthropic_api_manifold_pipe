@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.8
+version: 0.11.9
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,8 +37,13 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
-v0.11.7
+v0.11.9
+- Tito decide: when the `TITO_DECIDE_KEY` valve is empty, the key is read from env `TITO_DECIDE_KEY` (e.g. a compose `.env`). Valve still wins.
+
+v0.11.8
 - Tito decide: casual_chat question rewritten (scenario + literal-listener reading in its own instructions); held-out AUC .99 Jev / .86 MSD on 12 labeled messages.
+
+v0.11.7
 - Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
 v0.11.6
 - Tito decide shadow: new input flag `casual_chat` (casual chat about his day or feelings vs. a request for information, advice or a decision; prompt has chat and ask examples; no regex fallback, MSD failure gives no score). New output check `pure_vn` on the visible reply (fully natural Vietnamese, English only for names, brands, short terms and URLs), started with the output guard and logged as one `[TITO] decide_out` line with the guard trigger. Valve `TITO_DECIDE_INJECT` (default off): when on, the input flags are awaited before the main call and the lines of MSD-scored flags above threshold are added as one block in the VN reminder slot. Log only otherwise; fails open.
@@ -12312,12 +12317,13 @@ class Pipe:
     )
 
     def _tito_decide_key(self) -> str:
-        """Plaintext TITO_DECIDE_KEY, or "" when unset or unreadable. Never logged."""
+        """Plaintext TITO_DECIDE_KEY: the valve, else env TITO_DECIDE_KEY, else "". Never logged."""
         try:
             raw = getattr(self.valves, "TITO_DECIDE_KEY", "") or ""
-            return decrypt_valve_secret(raw).strip()
+            key = decrypt_valve_secret(raw).strip()
         except Exception:
-            return ""
+            key = ""
+        return key or os.environ.get("TITO_DECIDE_KEY", "").strip()
 
     def _tito_decide_enabled(self) -> bool:
         """True when the valve is on and a key is configured."""
