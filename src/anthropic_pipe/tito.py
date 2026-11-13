@@ -610,7 +610,7 @@ class PipeTitoMethods:
                          "no": "A background story would not add value here"},
         },
         "casual_chat": {
-            "question": "Is the dad just chatting about his day or his feelings, rather than asking for information, advice, or a decision?",
+            "question": "Is the dad just chatting about his day or his feelings, rather than asking for information, advice, or a decision? Chatting examples: 'Nay khách sạn đông quá', 'Hôm qua tôi nấu canh chua', 'Mấy bữa nay trời lạnh'. Asking examples: 'Thuốc này uống mấy viên vây!?', 'Chỗ nào bán phở ngon gần nhà?', 'Cái này tiếng Anh nói sao?'",
             "criteria": {"yes": "Casual chat about his day or feelings",
                          "no": "Asking for information, advice, or a decision"},
         },
@@ -624,12 +624,11 @@ class PipeTitoMethods:
         },
     }
     # Regex fallback per flag (Vietnamese keywords, case-insensitive, NFC text).
-    # casual_chat is 1.0 when the message has no "?" and none of the question words.
+    # casual_chat has no regex fallback: on MSD failure it gets no score (src=none).
     TITO_DECIDE_REGEX = {
         "smart_consumer": r"\b(giá|đô|bán|mua|title|tiền|thuế|IRS|marketplace)\b",
         "needs_search": r"\b(bao nhiêu|ở đâu|mới|bây giờ|Fresno|tin)\b",
         "ke_anh_nghe": r"\b(là gì|là sao|vì sao|thiệt không)\b",
-        "casual_chat": r"^(?![\s\S]*\?)(?![\s\S]*\b(?:bao nhiêu|ở đâu|là gì|là sao|vì sao|sao|không vây|được không|có phải)\b)",
     }
     # INJECT mode (valve TITO_DECIDE_INJECT): MSD-scored flags at or above these
     # thresholds add one line to the per-turn block. casual_chat always adds one
@@ -639,7 +638,7 @@ class PipeTitoMethods:
         "smart_consumer": "anh is weighing a purchase. Tito is the friend who knows prices: a fair range first, the one or two things worth checking, and an English line anh can say to bargain, laid out so anh can scan it on his phone, in everyday words. The choice stays anh's.",
         "needs_search": "anh's question touches something local, recent, or past what everyone already knows. Tito looks it up first, then talks like someone who just checked.",
         "ke_anh_nghe": "anh is curious about where this thing comes from. Tito keeps one small, true story about it in his pocket and shares it after the answer.",
-        "casual_chat": "anh is sharing about his day.",
+        "casual_chat": "anh is sharing about his day. A good friend hears the specific thing anh said and echoes it back warmly, sometimes with a gentle guess at how it felt (\"chắc anh cũng…\"), brings in what anh shared before, stays curious about one detail (a place, a smell, a meal, a person), and asks one easy question about it. Half-answers are fine. When anh brings up the old days, the friend walks there with him, then back to today.",
     }
     TITO_DECIDE_CASUAL_NO_LINE = "anh is asking about something he wants to know."
     # Log line order and short names: sc=smart_consumer, search=needs_search, story=ke_anh_nghe.
@@ -699,6 +698,13 @@ class PipeTitoMethods:
         norm = _ud.normalize("NFC", text or "")
         return 1.0 if _re.search(cls.TITO_DECIDE_REGEX[flag], norm, _re.IGNORECASE) else 0.0
 
+    @classmethod
+    def _tito_decide_fallback(cls, text: str, flag: str) -> dict:
+        """Score for a flag whose MSD call failed. casual_chat gets no score (src=none)."""
+        if flag == "casual_chat":
+            return {"p": 0.0, "src": "none"}
+        return {"p": cls._tito_decide_regex(text, flag), "src": "regex"}
+
     async def _tito_decide_shadow(self, text: str):
         """Score the three flags for ``text``. Never raises.
 
@@ -725,7 +731,7 @@ class PipeTitoMethods:
                     except Exception:
                         # Silent on purpose: the one decide line shows src=regex for this flag.
                         pass
-                results[flag] = {"p": self._tito_decide_regex(text, flag), "src": "regex"}
+                results[flag] = self._tito_decide_fallback(text, flag)
 
             tasks = [_aio.ensure_future(one(flag)) for flag in self.TITO_DECIDE_FLAGS]
             try:
@@ -736,10 +742,7 @@ class PipeTitoMethods:
                         task.cancel()
             out = {}
             for flag in self.TITO_DECIDE_FLAGS:
-                out[flag] = results.get(flag) or {
-                    "p": self._tito_decide_regex(text, flag),
-                    "src": "regex",
-                }
+                out[flag] = results.get(flag) or self._tito_decide_fallback(text, flag)
             return out
         except Exception as exc:
             logger.info("[TITO] decide failed err=%s", type(exc).__name__)

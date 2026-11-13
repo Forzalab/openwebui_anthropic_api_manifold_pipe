@@ -4,8 +4,8 @@ Per Tito turn, four input MSD-1 flags are scored over HTTP and LOGGED ONLY, and
 the pure_vn output check runs on the visible reply. Checks: the valve off makes no
 call; a successful run parses probabilities.yes and logs one ``[TITO] decide`` line
 in the agreed format; one failing flag falls back to the Vietnamese keyword regex
-for that flag only; a timeout fails open with no exception; the casual_chat regex
-fallback works both ways; the output check logs one ``[TITO] decide_out`` line and
+for that flag only; a timeout fails open with no exception; casual_chat has no regex
+fallback (src=none when MSD fails); the output check logs one ``[TITO] decide_out`` line and
 fails open; TITO_DECIDE_INJECT adds one block after the cache breakpoint only when
 on, and nothing on timeout; the API key and the message text never reach a log.
 
@@ -234,12 +234,11 @@ def main() -> int:
         assert TITO.PipeTitoMethods._tito_decide_regex("Chào buổi sáng", "smart_consumer") == 0.0
         assert TITO.PipeTitoMethods._tito_decide_regex("Thiệt không vậy?", "ke_anh_nghe") == 1.0
         assert TITO.PipeTitoMethods._tito_decide_regex("đôi giày mới", "smart_consumer") == 0.0  # "đô" inside "đôi"
-        # casual_chat regex: no "?" and no question word = 1.0; a question word or "?" = 0.0.
-        casual = TITO.PipeTitoMethods._tito_decide_regex
-        assert casual("Hôm nay tôi mệt quá", "casual_chat") == 1.0
-        assert casual("Hôm nay mệt quá không?", "casual_chat") == 0.0
-        assert casual("Cái này bao nhiêu", "casual_chat") == 0.0
-        assert casual("Chuyện này là gì vậy", "casual_chat") == 0.0
+        # casual_chat has no regex fallback: MSD failure gives no score (src=none).
+        fb = TITO.PipeTitoMethods._tito_decide_fallback
+        assert fb("Hôm nay tôi mệt quá", "casual_chat") == {"p": 0.0, "src": "none"}
+        assert fb("Cái này bao nhiêu", "casual_chat") == {"p": 0.0, "src": "none"}
+        assert fb("Cái này giá bao nhiêu?", "smart_consumer") == {"p": 1.0, "src": "regex"}
 
         # 4. Timeout: the calls outlive TITO_DECIDE_TIMEOUT_MS. Fails open, no exception,
         #    a regex line is still logged, and the call returns in about the timeout.
@@ -265,6 +264,7 @@ def main() -> int:
         assert "upstream refused" not in joined, "exception text leaked into logs"
         decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
         assert len(decide) == 1 and "sc=-" not in decide[0] and "(regex)" in decide[0], decide
+        assert "casual=0.00(none)" in decide[0], decide[0]
 
         # 6. Output check: valve off makes no call and logs nothing.
         calls = install_urlopen(ALL_SCORES)
