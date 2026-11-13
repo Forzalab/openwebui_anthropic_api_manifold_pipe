@@ -22,15 +22,16 @@ TITO_GUARD_MODEL = "claude-haiku-5-5"
 
 TITO_GUARD_RULES = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
 
-1. Exactly ONE question, as the very last sentence, ending with "?". Remove or turn other questions into statements. If there is no question, add ONE short warm question that fits the reply.
+1. Exactly ONE question, as the very last sentence, ending with "?". Remove or turn other questions into statements. If there is no question, add ONE short warm question that fits the reply. A "?" inside the English line anh is meant to say out loud does not count as Tito's question.
 2. Tito calls himself "Tito", never "tôi"/"em"/"con". Dad = "anh" / "anh Đính". Mom = "chị Ngân". Son = "thằng Tùng". Never "Tony", never "ông" for Dad.
 3. No talk about tools, data, systems, records, AI, or "bịa/nói bậy". If the reply says it cannot look something up, replace that with a light friend line ("trí nhớ Tito dạo này như cá vàng").
 4. No offer of things Tito can't do: calendar entries, ringing reminders, phone calls. Replace with "để Tito ghi ra cho anh nhớ nha".
 5. No telling him to sleep, rest, stop, or "để mai" unless he said he is tired.
 6. No flattery opener about his question ("câu hỏi hay", "đúng ý").
 7. No lecture or moralizing sentence; keep facts.
-8. Paragraphs: 1 to 3 short sentences, blank line between. No long dashes (— –); use commas or periods.
+8. Paragraphs: 1 to 3 short sentences, blank line between. No long dashes (— –); use commas or periods. Each line or paragraph, including each list item: 1 to 3 short sentences. A very short sentence is fine for emphasis or a new topic. Lists are fine.
 9. Do not quote poems.
+10. Write every sentence in Vietnamese. Translate or paraphrase any English sentence or English quote into natural Vietnamese. Keep English only for: names, brands, model names, short terms anh needs to recognise (e.g. title, smog, KBB), URLs, and ONE short English line meant for anh to say out loud (e.g. a bargaining line) — keep that line in English with its Vietnamese meaning right after in parentheses.
 
 If the text contains a marker like [[TITO-KEEP-1]], keep every marker exactly where it is, exactly once, and do not change it.
 Return JSON only: {"ok": true} if nothing breaks, else {"ok": false, "edited": "<the full fixed text>"}."""
@@ -64,6 +65,20 @@ _SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
 _NUMBER_RE = re.compile(r"\d+(?:[.,:/-]\d+)*")
 _URL_RE = re.compile(r"https?://[^\s<>\"']+")
 _DIGIT_TOKEN_RE = re.compile(r"\S*\d\S*")
+
+# English trigger and quote exemptions. A quote of at most 12 words is a short
+# line anh says out loud, so it is exempt; a longer one is still checked.
+_SHORT_QUOTE_WORDS = 12
+_ENGLISH_RUN_WORDS = 5
+_QUOTE_RE = re.compile(r'"([^"\n]*)"|“([^”\n]*)”')
+_NON_ASCII_LATIN_RE = re.compile(r"[À-ỹ]")  # Vietnamese and other accented letters
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+_MD_LINK_RE = re.compile(r"!?\[[^\]\n]*\]\([^)\n]*\)")
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+_WORD_EDGE_CHARS = "*_~#>-+.,!?;:()[]{}\"'“”‘’`"
+# A list item line: "- x", "* x" or "1. x" (the marker must be followed by a space).
+_LIST_ITEM_RE = re.compile(r"(?:[-*]|\d+\.)\s+")
 
 
 def _hidden_spans(content: str) -> list:
@@ -162,6 +177,77 @@ def tito_guard_rebuild(segments: list, edited: str) -> "str | None":
 _CARRIER_NEEDS_BLANK_RE = re.compile(r"([^\n])\n?(?=[ ]{0,3}\[anthropic-hidden[^\]]*\]:)")
 
 
+def _strip_short_quotes(text: str, english_only: bool = False) -> str:
+    """Blank out quoted spans of at most 12 words (English only when asked)."""
+
+    def blank(match: "re.Match") -> str:
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+        if len(inner.split()) > _SHORT_QUOTE_WORDS:
+            return match.group(0)
+        if english_only and _NON_ASCII_LATIN_RE.search(inner):
+            return match.group(0)
+        return " "
+
+    return _QUOTE_RE.sub(blank, text)
+
+
+# Unaccented Vietnamese words that are ASCII but are not English: they break a run.
+_VI_PLAIN_TOKENS = frozenset(
+    "anh chi cho nha hay ra xe xem coi tin ban ba ma la co con em ong nay tito".split()
+)
+# A run needs at least this many of these English function words to count.
+_ENGLISH_FUNCTION_WORDS = frozenset(
+    "the a an is are was be to of and for with you your if in on at this that it "
+    "from by or not can will have has would take please do does what how".split()
+)
+_ENGLISH_FUNCTION_MIN = 2
+
+
+def _has_english_run(text: str) -> bool:
+    """True when 5+ consecutive English-looking words include 2+ function words."""
+    run = []
+    for raw in text.split():
+        word = raw.strip(_WORD_EDGE_CHARS)
+        lowered = word.lower()
+        if word and _ENGLISH_WORD_RE.fullmatch(word) and lowered not in _VI_PLAIN_TOKENS:
+            run.append(lowered)
+            if (
+                len(run) >= _ENGLISH_RUN_WORDS
+                and sum(w in _ENGLISH_FUNCTION_WORDS for w in run) >= _ENGLISH_FUNCTION_MIN
+            ):
+                return True
+        else:
+            run = []
+    return False
+
+
+def _english_scan_text(text: str) -> str:
+    """Visible text with code, markdown links, URLs and short quotes blanked out."""
+    text = _CODE_FENCE_RE.sub(" ", text)
+    text = _CODE_SPAN_RE.sub(" ", text)
+    text = _MD_LINK_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    return _strip_short_quotes(text)
+
+
+def _rule_units(paragraph: str) -> list:
+    """Sentence-count units: each list item alone, the other lines together."""
+    units = []
+    plain = []
+    for line in paragraph.split("\n"):
+        item = line.strip()
+        if _LIST_ITEM_RE.match(item):
+            if plain:
+                units.append("\n".join(plain))
+                plain = []
+            units.append(_LIST_ITEM_RE.sub("", item, count=1))
+        else:
+            plain.append(line)
+    if plain:
+        units.append("\n".join(plain))
+    return units
+
+
 def tito_guard_trigger(text: str) -> "str | None":
     """Cheap local pre-check: name of the first rule signal, or None when clean."""
     if not text or not text.strip():
@@ -169,7 +255,7 @@ def tito_guard_trigger(text: str) -> "str | None":
     stripped = text.rstrip(" *\t\r\n")
     if not stripped.endswith("?"):
         return "no_final_question"
-    if text.count("?") > 1:
+    if _strip_short_quotes(text, english_only=True).count("?") > 1:
         return "multiple_questions"
     if re.search(r"\btôi\b", text, re.IGNORECASE):
         return "first_person"
@@ -181,8 +267,11 @@ def tito_guard_trigger(text: str) -> "str | None":
         paragraph = paragraph.strip()
         if not paragraph:
             continue
-        if len(_SENTENCE_END_RE.split(paragraph)) > 3:
-            return "long_paragraph"
+        for unit in _rule_units(paragraph):
+            if len(_SENTENCE_END_RE.split(unit.strip())) > 3:
+                return "long_paragraph"
+    if _has_english_run(_english_scan_text(text)):
+        return "english_sentence"
     return None
 
 
