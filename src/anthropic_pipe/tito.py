@@ -592,7 +592,12 @@ class PipeTitoMethods:
     # TITO_DECIDE_FLAGS are input flags (scored in parallel on the last user message);
     # TITO_DECIDE_OUT_FLAGS is the output check on Tito's visible reply.
     TITO_DECIDE_URL = "https://openrouter.ai/api/alpha/decisions"
-    TITO_DECIDE_MODEL = "microsoft/microsoft-decision-1"
+    # Main model first; the fallback is asked only when the main call fails, within the same budget.
+    TITO_DECIDE_MODEL = "~typesafe/jev-latest"
+    TITO_DECIDE_FALLBACK_MODEL = "microsoft/microsoft-decision-1"
+    # Every question carries an "instructions" field (some decision models reject questions without it).
+    TITO_DECIDE_IN_INSTRUCTIONS = "The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad in Fresno to a friendly chat companion. Judge the message as written."
+    TITO_DECIDE_OUT_INSTRUCTIONS = "The state is one reply, in Vietnamese, from a friendly chat companion to an elderly Vietnamese immigrant dad. Judge the reply as written."
     TITO_DECIDE_FLAGS = {
         "smart_consumer": {
             "question": "Is the dad weighing a purchase, a sale, a price, a seller, a used item, or money paperwork (an official letter, a title, a bill), where a fair price range, the one or two things worth checking, or facts a seller might leave out would help him?",
@@ -603,11 +608,6 @@ class PipeTitoMethods:
             "question": "Does a good reply need anything LOCAL (Fresno, his bus, his job, nearby places or events), RECENT (prices, news, rules that change), or beyond common knowledge, so a quick web search would make it better?",
             "criteria": {"yes": "A web search would improve the reply",
                          "no": "The reply works fine from general knowledge or feelings alone"},
-        },
-        "ke_anh_nghe": {
-            "question": "Is the dad asking about a thing, a word, a place, history, politics, cars, or Vietnam, where a short interesting background fact or story would add value?",
-            "criteria": {"yes": "A short background fact or story would add value",
-                         "no": "A background story would not add value here"},
         },
         "casual_chat": {
             "question": "Is the dad just chatting about his day or his feelings, rather than asking for information, advice, or a decision? Chatting examples: 'Nay khách sạn đông quá', 'Hôm qua tôi nấu canh chua', 'Mấy bữa nay trời lạnh'. Asking examples: 'Thuốc này uống mấy viên vây!?', 'Chỗ nào bán phở ngon gần nhà?', 'Cái này tiếng Anh nói sao?'",
@@ -628,24 +628,21 @@ class PipeTitoMethods:
     TITO_DECIDE_REGEX = {
         "smart_consumer": r"\b(giá|đô|bán|mua|title|tiền|thuế|IRS|marketplace)\b",
         "needs_search": r"\b(bao nhiêu|ở đâu|mới|bây giờ|Fresno|tin)\b",
-        "ke_anh_nghe": r"\b(là gì|là sao|vì sao|thiệt không)\b",
     }
     # INJECT mode (valve TITO_DECIDE_INJECT): MSD-scored flags at or above these
     # thresholds add one line to the per-turn block. casual_chat always adds one
     # of two lines (chat or question), split at its threshold.
-    TITO_DECIDE_INJECT_MIN = {"smart_consumer": 0.5, "needs_search": 0.25, "ke_anh_nghe": 0.5}
+    TITO_DECIDE_INJECT_MIN = {"smart_consumer": 0.5, "needs_search": 0.25}
     TITO_DECIDE_INJECT_LINES = {
         "smart_consumer": "anh is weighing a purchase. Tito is the friend who knows prices: a fair range first, the one or two things worth checking, and an English line anh can say to bargain, laid out so anh can scan it on his phone, in everyday words. The choice stays anh's.",
         "needs_search": "anh's question touches something local, recent, or past what everyone already knows. Tito looks it up first, then talks like someone who just checked.",
-        "ke_anh_nghe": "anh is curious about where this thing comes from. Tito keeps one small, true story about it in his pocket and shares it after the answer.",
-        "casual_chat": "anh is sharing about his day. A good friend hears the specific thing anh said and echoes it back warmly, sometimes with a gentle guess at how it felt (\"chắc anh cũng…\"), brings in what anh shared before, stays curious about one detail (a place, a smell, a meal, a person), and asks one easy question about it. Half-answers are fine. When anh brings up the old days, the friend walks there with him, then back to today.",
+        "casual_chat":"anh is sharing about his day. A good friend hears the specific thing anh said and echoes it back warmly, sometimes with a gentle guess at how it felt (\"chắc anh cũng…\"), brings in what anh shared before, stays curious about one detail (a place, a smell, a meal, a person), and asks one easy question about it. Half-answers are fine. When anh brings up the old days, the friend walks there with him, then back to today.",
     }
     TITO_DECIDE_CASUAL_NO_LINE = "anh is asking about something he wants to know."
-    # Log line order and short names: sc=smart_consumer, search=needs_search, story=ke_anh_nghe.
+    # Log line order and short names: sc=smart_consumer, search=needs_search, casual=casual_chat.
     TITO_DECIDE_LOG_NAMES = (
         ("smart_consumer", "sc"),
         ("needs_search", "search"),
-        ("ke_anh_nghe", "story"),
         ("casual_chat", "casual"),
     )
 
@@ -661,17 +658,30 @@ class PipeTitoMethods:
         """True when the valve is on and a key is configured."""
         return bool(getattr(self.valves, "TITO_DECIDE", False)) and bool(self._tito_decide_key())
 
+    def _tito_decide_models(self) -> tuple:
+        """(main, fallback) decide model ids from the valves; empty valve = class default."""
+        main = (getattr(self.valves, "TITO_DECIDE_MODEL", "") or "").strip() or self.TITO_DECIDE_MODEL
+        fallback = (
+            (getattr(self.valves, "TITO_DECIDE_FALLBACK_MODEL", "") or "").strip()
+            or self.TITO_DECIDE_FALLBACK_MODEL
+        )
+        return main, fallback
+
     @classmethod
-    def _tito_decide_post(cls, api_key: str, text: str, flag: str, timeout_s: float) -> float:
-        """Blocking MSD-1 call for one flag; returns probabilities.yes. Runs in a thread."""
+    def _tito_decide_post(cls, api_key: str, text: str, flag: str, timeout_s: float, model: str) -> float:
+        """Blocking decide call for one flag on ``model``; returns probabilities.yes. Runs in a thread."""
         import json as _json
         import urllib.request as _ur
 
         spec = {**cls.TITO_DECIDE_FLAGS, **cls.TITO_DECIDE_OUT_FLAGS}
+        instructions = (
+            cls.TITO_DECIDE_OUT_INSTRUCTIONS if flag in cls.TITO_DECIDE_OUT_FLAGS
+            else cls.TITO_DECIDE_IN_INSTRUCTIONS
+        )
         body = {
-            "model": cls.TITO_DECIDE_MODEL,
+            "model": model,
             "state": text,
-            "questions": {flag: {"type": "choice", **spec[flag]}},
+            "questions": {flag: {"type": "choice", "instructions": instructions, **spec[flag]}},
         }
         req = _ur.Request(
             cls.TITO_DECIDE_URL,
@@ -700,17 +710,46 @@ class PipeTitoMethods:
 
     @classmethod
     def _tito_decide_fallback(cls, text: str, flag: str) -> dict:
-        """Score for a flag whose MSD call failed. casual_chat gets no score (src=none)."""
+        """Score for a flag whose MSD calls all failed. casual_chat gets no score (src=none)."""
         if flag == "casual_chat":
             return {"p": 0.0, "src": "none"}
         return {"p": cls._tito_decide_regex(text, flag), "src": "regex"}
 
-    async def _tito_decide_shadow(self, text: str):
-        """Score the three flags for ``text``. Never raises.
+    async def _tito_decide_ask(self, key: str, text: str, flag: str, timeout_s: float):
+        """Ask Jev (main), then MSD-1 (fallback) if Jev failed, within one ``timeout_s`` budget.
 
-        Each flag asks MSD-1 concurrently with the per-call timeout; a flag that
-        errors or times out falls back to the regex. Returns
-        ``{flag: {"p": float, "src": "msd" | "regex"}}`` or None on an unexpected failure.
+        Returns ``{"p": float, "src": "jev" | "msd"}`` or None when both fail or time runs out.
+        Never raises.
+        """
+        import asyncio as _aio
+
+        try:
+            main, fallback = self._tito_decide_models()
+            t0 = time.monotonic()
+            for model, src in ((main, "jev"), (fallback, "msd")):
+                remaining = timeout_s - (time.monotonic() - t0)
+                if remaining <= 0:
+                    break
+                try:
+                    prob = await _aio.wait_for(
+                        _aio.to_thread(self._tito_decide_post, key, text, flag, remaining, model),
+                        remaining,
+                    )
+                    return {"p": prob, "src": src}
+                except Exception:
+                    # Silent on purpose: the decide line shows the source that answered, or regex/none.
+                    continue
+            return None
+        except Exception:
+            return None
+
+    async def _tito_decide_shadow(self, text: str):
+        """Score the input flags for ``text``. Never raises.
+
+        Each flag asks Jev, then MSD-1, concurrently with the per-flag budget
+        TITO_DECIDE_TIMEOUT_MS; a flag that fails or times out falls back to the
+        regex (casual_chat: none). Returns ``{flag: {"p": float, "src": "jev" | "msd" | "regex" | "none"}}``
+        or None on an unexpected failure.
         """
         import asyncio as _aio
 
@@ -720,18 +759,8 @@ class PipeTitoMethods:
             results: dict = {}
 
             async def one(flag: str) -> None:
-                if key:
-                    try:
-                        prob = await _aio.wait_for(
-                            _aio.to_thread(self._tito_decide_post, key, text, flag, timeout_s),
-                            timeout_s,
-                        )
-                        results[flag] = {"p": prob, "src": "msd"}
-                        return
-                    except Exception:
-                        # Silent on purpose: the one decide line shows src=regex for this flag.
-                        pass
-                results[flag] = self._tito_decide_fallback(text, flag)
+                got = await self._tito_decide_ask(key, text, flag, timeout_s) if key else None
+                results[flag] = got or self._tito_decide_fallback(text, flag)
 
             tasks = [_aio.ensure_future(one(flag)) for flag in self.TITO_DECIDE_FLAGS]
             try:
@@ -829,8 +858,8 @@ class PipeTitoMethods:
     async def _tito_decide_inject(self, state) -> str:
         """INJECT mode: await the input decide before the main call; return the block text or "".
 
-        Only MSD scores count: a regex fallback or a timeout gives no lines, so the
-        reply proceeds unchanged. Logs flag names only. Never raises.
+        Only model scores (src jev or msd) count: a regex fallback or a timeout gives
+        no lines, so the reply proceeds unchanged. Logs flag names only. Never raises.
         """
         import asyncio as _aio
 
@@ -848,7 +877,7 @@ class PipeTitoMethods:
             lines, names = [], []
             for flag in self.TITO_DECIDE_FLAGS:
                 item = result.get(flag) or {}
-                if item.get("src") != "msd":
+                if item.get("src") not in ("jev", "msd"):
                     continue
                 prob = float(item.get("p", 0.0))
                 if flag == "casual_chat":
@@ -886,18 +915,12 @@ class PipeTitoMethods:
             return None
 
     async def _tito_decide_out_call(self, text: str):
-        """One MSD-1 call for pure_vn; returns probabilities.yes or None. Never raises."""
-        import asyncio as _aio
-
+        """pure_vn check (Jev, then MSD-1); returns {"p", "src"} or None. Never raises."""
         try:
             key = self._tito_decide_key()
             if not key:
                 return None
-            timeout_s = self._tito_decide_timeout_s()
-            return await _aio.wait_for(
-                _aio.to_thread(self._tito_decide_post, key, text, "pure_vn", timeout_s),
-                timeout_s,
-            )
+            return await self._tito_decide_ask(key, text, "pure_vn", self._tito_decide_timeout_s())
         except Exception:
             return None
 
@@ -912,15 +935,18 @@ class PipeTitoMethods:
         try:
             task, t0 = state
             remaining = max(0.001, self._tito_decide_timeout_s() - (time.monotonic() - t0))
-            prob = None
+            got = None
             try:
-                prob = await _aio.wait_for(task, remaining)
+                got = await _aio.wait_for(task, remaining)
             except _aio.TimeoutError:
                 task.cancel()
             except Exception:
-                prob = None
+                got = None
             ms = int((time.monotonic() - t0) * 1000)
-            part = "pure_vn=-(none)" if prob is None else f"pure_vn={float(prob):.2f}(msd)"
+            if got:
+                part = f"pure_vn={float(got['p']):.2f}({got['src']})"
+            else:
+                part = "pure_vn=-(none)"
             logger.info("[TITO] decide_out %s guard_trigger=%s ms=%d", part, guard_trigger, ms)
         except Exception as exc:
             logger.info("[TITO] decide_out collect failed err=%s", type(exc).__name__)
