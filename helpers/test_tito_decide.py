@@ -1,13 +1,14 @@
-"""Self-check for Tito's decide shadow (valve TITO_DECIDE, default off).
+"""Self-check for Tito's decide step (valve TITO_DECIDE, default off).
 
-Per Tito turn, four input MSD-1 flags are scored over HTTP and LOGGED ONLY, and
-the pure_vn output check runs on the visible reply. Checks: the valve off makes no
-call; a successful run parses probabilities.yes and logs one ``[TITO] decide`` line
-in the agreed format; one failing flag falls back to the Vietnamese keyword regex
-for that flag only; a timeout fails open with no exception; casual_chat has no regex
-fallback (src=none when MSD fails); the output check logs one ``[TITO] decide_out`` line and
-fails open; TITO_DECIDE_INJECT adds one block after the cache breakpoint only when
-on, and nothing on timeout; the API key and the message text never reach a log.
+Per Tito turn, three input flags are scored over HTTP: the main model (Jev) first,
+then the fallback (MSD-1) only when the main call fails, all within
+TITO_DECIDE_TIMEOUT_MS per flag. The pure_vn check on the visible reply uses the same
+chain. Checks: the valve off makes no call; a main success logs src=jev; a main failure
+uses the fallback (src=msd); both failing falls back to the regex (casual_chat: none);
+a timeout fails open with no exception; every request body carries the "instructions"
+field with the agreed text; TITO_DECIDE_INJECT adds one block after the cache
+breakpoint only when on, and nothing on timeout; the API key and the message text never
+reach a log; the removed fourth flag appears nowhere in the source.
 
 HTTP is mocked by replacing ``urllib.request.urlopen``. Runs without OpenWebUI,
 without the anthropic SDK and without network access.
@@ -24,7 +25,6 @@ import logging
 import re
 import sys
 import time
-import typing
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,16 +34,23 @@ KEY = "sk-or-TEST-KEY-DO-NOT-LOG-123456"
 MESSAGE = "SECRET-MESSAGE-TEXT giá xe này bao nhiêu"
 REPLY = "SECRET-REPLY-TEXT Tito chào anh, giá tốt đó."
 META = {"model": {"id": "tito"}}
+JEV = "~typesafe/jev-latest"
+MSD = "microsoft/microsoft-decision-1"
+IN_TEXT = ("The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad "
+           "in Fresno to a friendly chat companion. Judge the message as written.")
+OUT_TEXT = ("The state is one reply, in Vietnamese, from a friendly chat companion to an elderly "
+            "Vietnamese immigrant dad. Judge the reply as written.")
+SRC_ALT = r"(jev|msd|regex|none)"
 LOG_LINE = re.compile(
-    r"^\[TITO\] decide sc=\d\.\d\d\((msd|regex)\) search=\d\.\d\d\((msd|regex)\) "
-    r"story=\d\.\d\d\((msd|regex)\) casual=\d\.\d\d\((msd|regex)\) ms=\d+$"
+    r"^\[TITO\] decide sc=\d\.\d\d\(" + SRC_ALT + r"\) search=\d\.\d\d\(" + SRC_ALT + r"\) "
+    r"casual=\d\.\d\d\(" + SRC_ALT + r"\) ms=\d+$"
 )
 OUT_LINE = re.compile(
-    r"^\[TITO\] decide_out (pure_vn=\d\.\d\d\(msd\)|pure_vn=-\(none\)) "
+    r"^\[TITO\] decide_out (pure_vn=\d\.\d\d\((jev|msd)\)|pure_vn=-\(none\)) "
     r"guard_trigger=\S+ ms=\d+$"
 )
-ALL_SCORES = {"smart_consumer": 0.97, "needs_search": 0.41, "ke_anh_nghe": 0.12,
-              "casual_chat": 0.9, "pure_vn": 0.02}
+ALL_SCORES = {"smart_consumer": 0.97, "needs_search": 0.41, "casual_chat": 0.9, "pure_vn": 0.02}
+INPUT_FLAGS = ("smart_consumer", "needs_search", "casual_chat")
 
 
 def _load(name: str, path: Path):
@@ -99,18 +106,25 @@ class FakeResponse:
         return False
 
 
-def install_urlopen(scores: dict, fail: set = frozenset(), sleep_s: float = 0.0):
-    """Replace urlopen. ``scores`` maps flag -> probability yes; ``fail`` flags raise."""
+def install_urlopen(scores: dict, fail: set = frozenset(), fail_models: set = frozenset(),
+                    sleep_s: float = 0.0, fail_pairs: set = frozenset()):
+    """Replace urlopen. ``scores`` maps flag -> probability yes.
+
+    ``fail`` flags raise on every model; ``fail_models`` model ids raise for every flag;
+    ``fail_pairs`` (flag, model) tuples raise for that one request.
+    """
     calls: list[dict] = []
 
     def fake(req, timeout=None):
         body = json.loads(req.data)
         flag = next(iter(body["questions"]))
+        question = body["questions"][flag]
         calls.append({"flag": flag, "state": body["state"], "auth": req.get_header("Authorization"),
-                      "model": body["model"], "url": req.full_url})
+                      "model": body["model"], "url": req.full_url,
+                      "instructions": question.get("instructions")})
         if sleep_s:
             time.sleep(sleep_s)
-        if flag in fail:
+        if flag in fail or body["model"] in fail_models or (flag, body["model"]) in fail_pairs:
             # The message carries the key on purpose: the pipe must log only the type name.
             raise OSError(f"upstream refused Bearer {KEY}")
         payload = {"answers": {flag: {"probabilities": {"yes": scores[flag]}}}}
@@ -189,7 +203,7 @@ def main() -> int:
     real_urlopen = urllib.request.urlopen
     try:
         # 1. Valve off: no call, no log, start returns None.
-        calls = install_urlopen({"smart_consumer": 0.9, "needs_search": 0.9, "ke_anh_nghe": 0.9})
+        calls = install_urlopen(ALL_SCORES)
         pipe = FakePipe(TITO_DECIDE=False)
         state = run_turn(pipe, MESSAGE, capture)
         assert state is None, "valve off must not start a task"
@@ -201,44 +215,75 @@ def main() -> int:
         state = run_turn(pipe, MESSAGE, capture)
         assert state is None and calls == [], "empty key must not call"
 
-        # 2. Success: parsed probabilities, one line in the agreed format, right request shape.
+        # 2. Main succeeds for every flag: one call per flag, all on Jev, src=jev, one line.
         calls = install_urlopen(ALL_SCORES)
         pipe = FakePipe()
         run_turn(pipe, MESSAGE, capture)
-        assert len(calls) == 4, f"expected 4 calls, got {len(calls)}"
-        assert {c["flag"] for c in calls} == set(TITO.PipeTitoMethods.TITO_DECIDE_FLAGS)
+        assert len(calls) == 3, f"expected 3 calls (main only), got {len(calls)}"
+        assert {c["flag"] for c in calls} == set(INPUT_FLAGS)
         assert all(c["auth"] == "Bearer " + KEY for c in calls), "auth header wrong"
         assert all(c["url"] == "https://openrouter.ai/api/alpha/decisions" for c in calls)
-        assert all(c["model"] == "microsoft/microsoft-decision-1" for c in calls)
+        assert all(c["model"] == JEV for c in calls), "main model not used"
         assert all(c["state"] == MESSAGE for c in calls), "state is not the last user message"
+        assert all(c["instructions"] == IN_TEXT for c in calls), "instructions missing or wrong"
         decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
         assert len(decide) == 1, f"expected one decide line, got {decide}"
         assert LOG_LINE.match(decide[0]), f"bad log format: {decide[0]}"
-        assert "sc=0.97(msd)" in decide[0] and "search=0.41(msd)" in decide[0] and "story=0.12(msd)" in decide[0], decide[0]
-        assert "casual=0.90(msd)" in decide[0], decide[0]
+        assert "sc=0.97(jev)" in decide[0] and "search=0.41(jev)" in decide[0], decide[0]
+        assert "casual=0.90(jev)" in decide[0], decide[0]
 
-        # 3. One flag fails: regex fallback for that flag only, marked regex.
-        calls = install_urlopen(ALL_SCORES, fail={"needs_search"})
-        pipe = FakePipe()
-        result_state = run_turn(pipe, MESSAGE, capture)
+        # 3. Main fails for every flag: the fallback answers each flag (src=msd), Jev then MSD.
+        calls = install_urlopen(ALL_SCORES, fail_models={JEV})
+        result_state = run_turn(FakePipe(), MESSAGE, capture)
         decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
         assert len(decide) == 1 and LOG_LINE.match(decide[0]), decide
-        assert "sc=0.97(msd)" in decide[0], decide[0]
-        assert "search=1.00(regex)" in decide[0], decide[0]  # "bao nhiêu" hits the regex
-        assert "story=0.12(msd)" in decide[0], decide[0]
+        assert "sc=0.97(msd)" in decide[0] and "search=0.41(msd)" in decide[0], decide[0]
         assert "casual=0.90(msd)" in decide[0], decide[0]
+        assert [c["model"] for c in calls if c["flag"] == "needs_search"] == [JEV, MSD], calls
+        assert all(c["instructions"] == IN_TEXT for c in calls), "fallback request lacks instructions"
         assert result_state is not None
+
+        # 3a. Main fails for one flag only: that flag reaches the fallback, the rest stay jev.
+        calls = install_urlopen(ALL_SCORES)
+        orig_fake = urllib.request.urlopen
+
+        def jev_down_for_search(req, timeout=None):
+            body = json.loads(req.data)
+            if body["model"] == JEV and "needs_search" in body["questions"]:
+                raise OSError("jev down for needs_search")
+            return orig_fake(req, timeout=timeout)
+
+        urllib.request.urlopen = jev_down_for_search
+        run_turn(FakePipe(), MESSAGE, capture)
+        urllib.request.urlopen = orig_fake
+        decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
+        assert "search=0.41(msd)" in decide[-1] and "sc=0.97(jev)" in decide[-1], decide[-1]
 
         # 3b. Regex directly: keyword hits and misses.
         assert TITO.PipeTitoMethods._tito_decide_regex("Cái này giá bao nhiêu?", "smart_consumer") == 1.0
         assert TITO.PipeTitoMethods._tito_decide_regex("Chào buổi sáng", "smart_consumer") == 0.0
-        assert TITO.PipeTitoMethods._tito_decide_regex("Thiệt không vậy?", "ke_anh_nghe") == 1.0
         assert TITO.PipeTitoMethods._tito_decide_regex("đôi giày mới", "smart_consumer") == 0.0  # "đô" inside "đôi"
-        # casual_chat has no regex fallback: MSD failure gives no score (src=none).
+        # casual_chat has no regex fallback: no score when both models fail (src=none).
         fb = TITO.PipeTitoMethods._tito_decide_fallback
         assert fb("Hôm nay tôi mệt quá", "casual_chat") == {"p": 0.0, "src": "none"}
         assert fb("Cái này bao nhiêu", "casual_chat") == {"p": 0.0, "src": "none"}
         assert fb("Cái này giá bao nhiêu?", "smart_consumer") == {"p": 1.0, "src": "regex"}
+
+        # 3c. Both models fail for one flag: regex for that flag (src=regex), the others stay jev.
+        both_down = {("needs_search", JEV), ("needs_search", MSD)}
+        calls = install_urlopen(ALL_SCORES, fail_pairs=both_down)
+        run_turn(FakePipe(), MESSAGE, capture)
+        decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
+        assert LOG_LINE.match(decide[-1]), decide
+        assert "search=1.00(regex)" in decide[-1], decide[-1]  # "bao nhiêu" hits the regex
+        assert "sc=0.97(jev)" in decide[-1] and "casual=0.90(jev)" in decide[-1], decide[-1]
+        assert [c["model"] for c in calls if c["flag"] == "needs_search"] == [JEV, MSD]
+
+        # 3d. Both models fail for casual_chat only: src=none, no score.
+        install_urlopen(ALL_SCORES, fail={"casual_chat"})
+        run_turn(FakePipe(), MESSAGE, capture)
+        decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
+        assert "casual=0.00(none)" in decide[-1], decide[-1]
 
         # 4. Timeout: the calls outlive TITO_DECIDE_TIMEOUT_MS. Fails open, no exception,
         #    a regex line is still logged, and the call returns in about the timeout.
@@ -252,10 +297,10 @@ def main() -> int:
         assert elapsed < 0.6, f"timeout did not bound the wait: {elapsed:.2f}s"
         decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
         assert len(decide) == 1, decide
-        assert "(msd)" not in decide[0], f"timed-out flags must not be msd: {decide[0]}"
+        assert "(jev)" not in decide[0] and "(msd)" not in decide[0], f"timed-out flags must not be model scores: {decide[0]}"
 
         # 5. Key and message text never reach a log record (including the failure path).
-        install_urlopen(ALL_SCORES, fail={"smart_consumer", "needs_search", "ke_anh_nghe", "casual_chat", "pure_vn"})
+        install_urlopen(ALL_SCORES, fail={"smart_consumer", "needs_search", "casual_chat"})
         pipe = FakePipe()
         run_turn(pipe, MESSAGE, capture)
         joined = "\n".join(capture.messages)
@@ -278,17 +323,32 @@ def main() -> int:
         assert FakePipe()._tito_decide_out_start(ctx, {"model": {"id": "claude-opus-5-5"}}) is None
         assert calls == [], "non-tito made an output call"
 
-        # 6c. Success: one pure_vn call with the visible reply, one decide_out line.
+        # 6c. Main succeeds: one pure_vn call with the visible reply, one decide_out line (jev).
         calls = install_urlopen(ALL_SCORES)
         run_out(FakePipe(), REPLY, capture, guard_trigger="english_sentence")
         out = [m for m in capture.messages if m.startswith("[TITO] decide_out")]
         assert len(out) == 1 and OUT_LINE.match(out[0]), out
-        assert "pure_vn=0.02(msd)" in out[0] and "guard_trigger=english_sentence" in out[0], out[0]
+        assert "pure_vn=0.02(jev)" in out[0] and "guard_trigger=english_sentence" in out[0], out[0]
         assert [c["flag"] for c in calls] == ["pure_vn"], calls
-        assert calls[0]["state"] == REPLY and calls[0]["model"] == "microsoft/microsoft-decision-1"
+        assert calls[0]["state"] == REPLY and calls[0]["model"] == JEV
+        assert calls[0]["instructions"] == OUT_TEXT, "output instructions wrong"
         assert not any("SECRET-REPLY-TEXT" in m for m in capture.messages), "reply text logged"
 
-        # 6d. Timeout: fails open, src=none, bounded by the timeout.
+        # 6d. Main fails: fallback answers pure_vn (src=msd), Jev then MSD.
+        calls = install_urlopen(ALL_SCORES, fail_models={JEV})
+        run_out(FakePipe(), REPLY, capture)
+        out = [m for m in capture.messages if m.startswith("[TITO] decide_out")]
+        assert len(out) == 1 and OUT_LINE.match(out[0]) and "pure_vn=0.02(msd)" in out[0], out
+        assert [c["model"] for c in calls] == [JEV, MSD], calls
+        assert all(c["instructions"] == OUT_TEXT for c in calls), "fallback output request lacks instructions"
+
+        # 6e. Both fail: src=none on the output line.
+        install_urlopen(ALL_SCORES, fail_models={JEV, MSD})
+        run_out(FakePipe(), REPLY, capture)
+        out = [m for m in capture.messages if m.startswith("[TITO] decide_out")]
+        assert len(out) == 1 and "pure_vn=-(none)" in out[0] and OUT_LINE.match(out[0]), out
+
+        # 6f. Output timeout: fails open, src=none, bounded by the timeout.
         install_urlopen(ALL_SCORES, sleep_s=1.0)
         run_out(FakePipe(TITO_DECIDE_TIMEOUT_MS=150), REPLY, capture)
         assert ELAPSED["out"] < 0.6, f"output timeout did not bound the wait: {ELAPSED['out']:.2f}s"
@@ -316,7 +376,6 @@ def main() -> int:
             TITO.PipeTitoMethods.TITO_DECIDE_INJECT_LINES["casual_chat"],
         ])
         assert inject == expected, f"wrong inject text: {inject[:80]!r}"
-        assert "anh is curious" not in inject, "ke_anh_nghe below threshold must not inject"
         state_vn = pipe._tito_vn_reminder_apply(payload, inject)
         assert state_vn is not None
         last = payload["messages"][2]["content"]
@@ -327,8 +386,14 @@ def main() -> int:
         decide = [m for m in capture.messages if m.startswith("[TITO] decide_inject flags=")]
         assert decide and decide[-1].endswith("smart_consumer,needs_search,casual_chat"), decide
 
-        # 8b. INJECT on with the regex fallback only (MSD fails): no lines, reply proceeds.
-        install_urlopen(ALL_SCORES, fail={"smart_consumer", "needs_search", "ke_anh_nghe", "casual_chat"})
+        # 8a. INJECT on, main fails everywhere, fallback answers (src=msd): lines still added.
+        install_urlopen(ALL_SCORES, fail_models={JEV})
+        pipe = FakePipe(TITO_DECIDE_INJECT=True, TITO_VN_REMINDER="")
+        _, inject = asyncio.run(_start_and_inject(pipe, _payload_with_breakpoint()))
+        assert inject == expected, "fallback scores must count for INJECT"
+
+        # 8b. INJECT on with the regex fallback only (both models fail): no lines, reply proceeds.
+        install_urlopen(ALL_SCORES, fail={"smart_consumer", "needs_search", "casual_chat"})
         pipe = FakePipe(TITO_DECIDE_INJECT=True)
         _, inject = asyncio.run(_start_and_inject(pipe, _payload_with_breakpoint()))
         assert inject == "", f"regex fallback injected: {inject!r}"
@@ -337,16 +402,31 @@ def main() -> int:
         install_urlopen(ALL_SCORES, sleep_s=1.0)
         pipe = FakePipe(TITO_DECIDE_INJECT=True, TITO_DECIDE_TIMEOUT_MS=150)
         payload = _payload_with_breakpoint()
-        t0 = time.monotonic()
         _, inject = asyncio.run(_start_and_inject(pipe, payload))
         assert ELAPSED["inject"] < 0.6, f"inject timeout did not bound the wait: {ELAPSED['inject']:.2f}s"
         assert inject == "", "timeout injected a block"
         assert pipe._tito_vn_reminder_apply(payload, inject) is None, "timeout added a block"
         assert "decide_inject outcome=timeout" in "\n".join(capture.messages)
+
+        # 10. Models: class defaults, valve overrides, empty fallback valve = default.
+        pipe = FakePipe()
+        assert pipe._tito_decide_models() == (JEV, MSD), pipe._tito_decide_models()
+        pipe.valves.TITO_DECIDE_MODEL = "other/main"
+        pipe.valves.TITO_DECIDE_FALLBACK_MODEL = ""
+        assert pipe._tito_decide_models() == ("other/main", MSD), pipe._tito_decide_models()
+
+        # 11. The removed fourth flag is gone from the source and every table.
+        removed = "ke_anh" + "_nghe"
+        source = (SRC / "tito.py").read_text(encoding="utf-8")
+        assert removed not in source, "removed flag still in tito.py"
+        assert removed not in TITO.PipeTitoMethods.TITO_DECIDE_FLAGS
+        assert removed not in TITO.PipeTitoMethods.TITO_DECIDE_REGEX
+        assert removed not in TITO.PipeTitoMethods.TITO_DECIDE_INJECT_LINES
+        assert set(TITO.PipeTitoMethods.TITO_DECIDE_FLAGS) == set(INPUT_FLAGS)
     finally:
         urllib.request.urlopen = real_urlopen
 
-    print("ok: tito decide shadow")
+    print("ok: tito decide step")
     return 0
 
 

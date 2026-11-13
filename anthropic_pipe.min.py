@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.6
+version: 0.11.7
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,8 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.7
+- Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
 v0.11.6
 - Tito decide shadow: new input flag `casual_chat` (casual chat about his day or feelings vs. a request for information, advice or a decision; prompt has chat and ask examples; no regex fallback, MSD failure gives no score). New output check `pure_vn` on the visible reply (fully natural Vietnamese, English only for names, brands, short terms and URLs), started with the output guard and logged as one `[TITO] decide_out` line with the guard trigger. Valve `TITO_DECIDE_INJECT` (default off): when on, the input flags are awaited before the main call and the lines of MSD-scored flags above threshold are added as one block in the VN reminder slot. Log only otherwise; fails open.
 
@@ -44,7 +46,7 @@ v0.11.5
 - Tito output guard: Vietnamese-only rule (rule 10: English kept only for names, brands, short terms, URLs and one short English line with its Vietnamese meaning), new trigger `english_sentence` (5+ consecutive English words with 2+ English function words, outside URLs, code, links and quotes of 12 words or fewer; common unaccented Vietnamese words break a run), list items judged one by one (over 3 sentences = long_paragraph), and multiple_questions ignores a short quoted English line.
 
 v0.11.4
-- Tito decide shadow (valve `TITO_DECIDE`, default off): per Tito turn, three flags (smart_consumer, needs_search, ke_anh_nghe) are scored with OpenRouter MSD-1 in parallel, started before the main stream and awaited after it. One `[TITO] decide` line is logged; the reply is never changed or delayed. Any error or timeout falls back to a Vietnamese keyword regex per flag. The key (`TITO_DECIDE_KEY`, encrypted at rest) and message text are never logged.
+- Tito decide shadow (valve `TITO_DECIDE`, default off): per Tito turn, three flags (smart_consumer, needs_search, and a story flag) are scored with OpenRouter MSD-1 in parallel, started before the main stream and awaited after it. One `[TITO] decide` line is logged; the reply is never changed or delayed. Any error or timeout falls back to a Vietnamese keyword regex per flag. The key (`TITO_DECIDE_KEY`, encrypted at rest) and message text are never logged.
 
 v0.11.3
 - Tito per-turn VN reminder (valve `TITO_VN_REMINDER`, default empty = off): one extra text block appended to the last user message of the first request of each turn, after the prompt-cache breakpoints. It carries no cache_control, is removed before the next tool-loop iteration, and is never logged (only its length).
@@ -3474,6 +3476,14 @@ class Pipe:
             default=False,
             description="Tito only. Shadow mode: per turn, score the input flags and the pure_vn output "
             "check with OpenRouter MSD-1 and log [TITO] decide lines. No effect on the reply. Off = no call.",
+        )
+        TITO_DECIDE_MODEL: str = Field(
+            default="~typesafe/jev-latest",
+            description="Tito only. Main model id for the TITO_DECIDE calls (OpenRouter decisions endpoint).",
+        )
+        TITO_DECIDE_FALLBACK_MODEL: str = Field(
+            default="microsoft/microsoft-decision-1",
+            description="Tito only. Fallback model id for TITO_DECIDE, asked only when the main model call fails.",
         )
         TITO_DECIDE_KEY: EncryptedStr = Field(
             default="",
@@ -9927,7 +9937,12 @@ class Pipe:
                     return
 
     TITO_DECIDE_URL = "https://openrouter.ai/api/alpha/decisions"
-    TITO_DECIDE_MODEL = "microsoft/microsoft-decision-1"
+
+    TITO_DECIDE_MODEL = "~typesafe/jev-latest"
+    TITO_DECIDE_FALLBACK_MODEL = "microsoft/microsoft-decision-1"
+
+    TITO_DECIDE_IN_INSTRUCTIONS = "The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad in Fresno to a friendly chat companion. Judge the message as written."
+    TITO_DECIDE_OUT_INSTRUCTIONS = "The state is one reply, in Vietnamese, from a friendly chat companion to an elderly Vietnamese immigrant dad. Judge the reply as written."
     TITO_DECIDE_FLAGS = {
         "smart_consumer": {
             "question": "Is the dad weighing a purchase, a sale, a price, a seller, a used item, or money paperwork (an official letter, a title, a bill), where a fair price range, the one or two things worth checking, or facts a seller might leave out would help him?",
@@ -9938,11 +9953,6 @@ class Pipe:
             "question": "Does a good reply need anything LOCAL (Fresno, his bus, his job, nearby places or events), RECENT (prices, news, rules that change), or beyond common knowledge, so a quick web search would make it better?",
             "criteria": {"yes": "A web search would improve the reply",
                          "no": "The reply works fine from general knowledge or feelings alone"},
-        },
-        "ke_anh_nghe": {
-            "question": "Is the dad asking about a thing, a word, a place, history, politics, cars, or Vietnam, where a short interesting background fact or story would add value?",
-            "criteria": {"yes": "A short background fact or story would add value",
-                         "no": "A background story would not add value here"},
         },
         "casual_chat": {
             "question": "Is the dad just chatting about his day or his feelings, rather than asking for information, advice, or a decision? Chatting examples: 'Nay khách sạn đông quá', 'Hôm qua tôi nấu canh chua', 'Mấy bữa nay trời lạnh'. Asking examples: 'Thuốc này uống mấy viên vây!?', 'Chỗ nào bán phở ngon gần nhà?', 'Cái này tiếng Anh nói sao?'",
@@ -9962,22 +9972,19 @@ class Pipe:
     TITO_DECIDE_REGEX = {
         "smart_consumer": r"\b(giá|đô|bán|mua|title|tiền|thuế|IRS|marketplace)\b",
         "needs_search": r"\b(bao nhiêu|ở đâu|mới|bây giờ|Fresno|tin)\b",
-        "ke_anh_nghe": r"\b(là gì|là sao|vì sao|thiệt không)\b",
     }
 
-    TITO_DECIDE_INJECT_MIN = {"smart_consumer": 0.5, "needs_search": 0.25, "ke_anh_nghe": 0.5}
+    TITO_DECIDE_INJECT_MIN = {"smart_consumer": 0.5, "needs_search": 0.25}
     TITO_DECIDE_INJECT_LINES = {
         "smart_consumer": "anh is weighing a purchase. Tito is the friend who knows prices: a fair range first, the one or two things worth checking, and an English line anh can say to bargain, laid out so anh can scan it on his phone, in everyday words. The choice stays anh's.",
         "needs_search": "anh's question touches something local, recent, or past what everyone already knows. Tito looks it up first, then talks like someone who just checked.",
-        "ke_anh_nghe": "anh is curious about where this thing comes from. Tito keeps one small, true story about it in his pocket and shares it after the answer.",
-        "casual_chat": "anh is sharing about his day. A good friend hears the specific thing anh said and echoes it back warmly, sometimes with a gentle guess at how it felt (\"chắc anh cũng…\"), brings in what anh shared before, stays curious about one detail (a place, a smell, a meal, a person), and asks one easy question about it. Half-answers are fine. When anh brings up the old days, the friend walks there with him, then back to today.",
+        "casual_chat":"anh is sharing about his day. A good friend hears the specific thing anh said and echoes it back warmly, sometimes with a gentle guess at how it felt (\"chắc anh cũng…\"), brings in what anh shared before, stays curious about one detail (a place, a smell, a meal, a person), and asks one easy question about it. Half-answers are fine. When anh brings up the old days, the friend walks there with him, then back to today.",
     }
     TITO_DECIDE_CASUAL_NO_LINE = "anh is asking about something he wants to know."
 
     TITO_DECIDE_LOG_NAMES = (
         ("smart_consumer", "sc"),
         ("needs_search", "search"),
-        ("ke_anh_nghe", "story"),
         ("casual_chat", "casual"),
     )
 
@@ -9991,16 +9998,28 @@ class Pipe:
     def _tito_decide_enabled(self) -> bool:
         return bool(getattr(self.valves, "TITO_DECIDE", False)) and bool(self._tito_decide_key())
 
+    def _tito_decide_models(self) -> tuple:
+        main = (getattr(self.valves, "TITO_DECIDE_MODEL", "") or "").strip() or self.TITO_DECIDE_MODEL
+        fallback = (
+            (getattr(self.valves, "TITO_DECIDE_FALLBACK_MODEL", "") or "").strip()
+            or self.TITO_DECIDE_FALLBACK_MODEL
+        )
+        return main, fallback
+
     @classmethod
-    def _tito_decide_post(cls, api_key: str, text: str, flag: str, timeout_s: float) -> float:
+    def _tito_decide_post(cls, api_key: str, text: str, flag: str, timeout_s: float, model: str) -> float:
         import json as _json
         import urllib.request as _ur
 
         spec = {**cls.TITO_DECIDE_FLAGS, **cls.TITO_DECIDE_OUT_FLAGS}
+        instructions = (
+            cls.TITO_DECIDE_OUT_INSTRUCTIONS if flag in cls.TITO_DECIDE_OUT_FLAGS
+            else cls.TITO_DECIDE_IN_INSTRUCTIONS
+        )
         body = {
-            "model": cls.TITO_DECIDE_MODEL,
+            "model": model,
             "state": text,
-            "questions": {flag: {"type": "choice", **spec[flag]}},
+            "questions": {flag: {"type": "choice", "instructions": instructions, **spec[flag]}},
         }
         req = _ur.Request(
             cls.TITO_DECIDE_URL,
@@ -10032,6 +10051,29 @@ class Pipe:
             return {"p": 0.0, "src": "none"}
         return {"p": cls._tito_decide_regex(text, flag), "src": "regex"}
 
+    async def _tito_decide_ask(self, key: str, text: str, flag: str, timeout_s: float):
+        import asyncio as _aio
+
+        try:
+            main, fallback = self._tito_decide_models()
+            t0 = time.monotonic()
+            for model, src in ((main, "jev"), (fallback, "msd")):
+                remaining = timeout_s - (time.monotonic() - t0)
+                if remaining <= 0:
+                    break
+                try:
+                    prob = await _aio.wait_for(
+                        _aio.to_thread(self._tito_decide_post, key, text, flag, remaining, model),
+                        remaining,
+                    )
+                    return {"p": prob, "src": src}
+                except Exception:
+
+                    continue
+            return None
+        except Exception:
+            return None
+
     async def _tito_decide_shadow(self, text: str):
         import asyncio as _aio
 
@@ -10041,18 +10083,8 @@ class Pipe:
             results: dict = {}
 
             async def one(flag: str) -> None:
-                if key:
-                    try:
-                        prob = await _aio.wait_for(
-                            _aio.to_thread(self._tito_decide_post, key, text, flag, timeout_s),
-                            timeout_s,
-                        )
-                        results[flag] = {"p": prob, "src": "msd"}
-                        return
-                    except Exception:
-
-                        pass
-                results[flag] = self._tito_decide_fallback(text, flag)
+                got = await self._tito_decide_ask(key, text, flag, timeout_s) if key else None
+                results[flag] = got or self._tito_decide_fallback(text, flag)
 
             tasks = [_aio.ensure_future(one(flag)) for flag in self.TITO_DECIDE_FLAGS]
             try:
@@ -10152,7 +10184,7 @@ class Pipe:
             lines, names = [], []
             for flag in self.TITO_DECIDE_FLAGS:
                 item = result.get(flag) or {}
-                if item.get("src") != "msd":
+                if item.get("src") not in ("jev", "msd"):
                     continue
                 prob = float(item.get("p", 0.0))
                 if flag == "casual_chat":
@@ -10185,17 +10217,11 @@ class Pipe:
             return None
 
     async def _tito_decide_out_call(self, text: str):
-        import asyncio as _aio
-
         try:
             key = self._tito_decide_key()
             if not key:
                 return None
-            timeout_s = self._tito_decide_timeout_s()
-            return await _aio.wait_for(
-                _aio.to_thread(self._tito_decide_post, key, text, "pure_vn", timeout_s),
-                timeout_s,
-            )
+            return await self._tito_decide_ask(key, text, "pure_vn", self._tito_decide_timeout_s())
         except Exception:
             return None
 
@@ -10205,15 +10231,18 @@ class Pipe:
         try:
             task, t0 = state
             remaining = max(0.001, self._tito_decide_timeout_s() - (time.monotonic() - t0))
-            prob = None
+            got = None
             try:
-                prob = await _aio.wait_for(task, remaining)
+                got = await _aio.wait_for(task, remaining)
             except _aio.TimeoutError:
                 task.cancel()
             except Exception:
-                prob = None
+                got = None
             ms = int((time.monotonic() - t0) * 1000)
-            part = "pure_vn=-(none)" if prob is None else f"pure_vn={float(prob):.2f}(msd)"
+            if got:
+                part = f"pure_vn={float(got['p']):.2f}({got['src']})"
+            else:
+                part = "pure_vn=-(none)"
             logger.info("[TITO] decide_out %s guard_trigger=%s ms=%d", part, guard_trigger, ms)
         except Exception as exc:
             logger.info("[TITO] decide_out collect failed err=%s", type(exc).__name__)
