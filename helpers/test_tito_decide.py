@@ -72,6 +72,9 @@ TITO.decrypt_valve_secret = lambda value: str(value)
 TITO.logger = logging.getLogger("tito_decide_test")
 
 
+CASUAL_TEXT = TITO.PipeTitoMethods.TITO_DECIDE_FLAGS["casual_chat"]["instructions"]
+
+
 class FakePipe(TITO.PipeTitoMethods):
     def __init__(self, **valves):
         self.valves = SimpleNamespace(
@@ -225,7 +228,7 @@ def main() -> int:
         assert all(c["url"] == "https://openrouter.ai/api/alpha/decisions" for c in calls)
         assert all(c["model"] == JEV for c in calls), "main model not used"
         assert all(c["state"] == MESSAGE for c in calls), "state is not the last user message"
-        assert all(c["instructions"] == IN_TEXT for c in calls), "instructions missing or wrong"
+        assert all(c["instructions"] == (CASUAL_TEXT if c["flag"] == "casual_chat" else IN_TEXT) for c in calls), "instructions missing or wrong"
         decide = [m for m in capture.messages if m.startswith("[TITO] decide")]
         assert len(decide) == 1, f"expected one decide line, got {decide}"
         assert LOG_LINE.match(decide[0]), f"bad log format: {decide[0]}"
@@ -240,7 +243,7 @@ def main() -> int:
         assert "sc=0.97(msd)" in decide[0] and "search=0.41(msd)" in decide[0], decide[0]
         assert "casual=0.90(msd)" in decide[0], decide[0]
         assert [c["model"] for c in calls if c["flag"] == "needs_search"] == [JEV, MSD], calls
-        assert all(c["instructions"] == IN_TEXT for c in calls), "fallback request lacks instructions"
+        assert all(c["instructions"] == (CASUAL_TEXT if c["flag"] == "casual_chat" else IN_TEXT) for c in calls), "fallback request lacks instructions"
         assert result_state is not None
 
         # 3a. Main fails for one flag only: that flag reaches the fallback, the rest stay jev.
