@@ -397,6 +397,71 @@ async def test_rebuild_keeps_blank_line_before_hidden_carrier():
         assert "\n\n\n[anthropic" not in out, repr(out)
 
 
+async def test_english_paragraph_triggers_english_sentence():
+    """A run of 5+ English words outside quotes, links and URLs is a rule break."""
+    text = "The car has a clean title and no smog issues at all. Anh thấy sao?"
+    assert GUARD.tito_guard_trigger(text) == "english_sentence", GUARD.tito_guard_trigger(text)
+
+    # Longer than 12 words in quotes: the quote exemption does not apply.
+    long_quote = (
+        'Người bán nói: "I will be honest with you about this car and its history '
+        'and its condition today." Anh thấy sao?'
+    )
+    assert GUARD.tito_guard_trigger(long_quote) == "english_sentence", GUARD.tito_guard_trigger(long_quote)
+
+
+async def test_short_quoted_english_line_is_not_a_second_question():
+    """A "?" inside a short quoted English line is anh's line, not Tito's question."""
+    text = 'Anh cứ nói với họ: "Would you take $45?" Họ sẽ đồng ý thôi. Anh thấy sao?'
+    assert GUARD.tito_guard_trigger(text) is None, GUARD.tito_guard_trigger(text)
+
+    with_meaning = (
+        'Anh cứ nói với họ: "Would you take $45?" (anh lấy 45 đô nha.) '
+        "Họ sẽ đồng ý thôi. Anh thấy sao?"
+    )
+    assert GUARD.tito_guard_trigger(with_meaning) is None, GUARD.tito_guard_trigger(with_meaning)
+
+    # A second question outside the quote still counts.
+    two = 'Anh nói: "Would you take $45?" Họ hỏi nữa không? Anh thấy sao?'
+    assert GUARD.tito_guard_trigger(two) == "multiple_questions", GUARD.tito_guard_trigger(two)
+
+
+async def test_brand_and_model_names_do_not_trigger():
+    """Brand, model and listing names inside Vietnamese prose are not English sentences."""
+    text = "Anh xem giúp Tito cái Toyota Camry 2009, KBB ghi 300 triệu, bản M65 nha. Anh thấy sao?"
+    assert GUARD.tito_guard_trigger(text) is None, GUARD.tito_guard_trigger(text)
+
+
+async def test_url_does_not_trigger():
+    """Words inside a URL, a markdown link or a code span are not checked."""
+    text = "Anh xem link này nha: https://www.kbb.com/toyota/camry/2009/values giá tốt không?"
+    assert GUARD.tito_guard_trigger(text) is None, GUARD.tito_guard_trigger(text)
+
+    linked = "Anh xem [Toyota Camry Value Listing Page](https://example.com/x) nha, được không?"
+    assert GUARD.tito_guard_trigger(linked) is None, GUARD.tito_guard_trigger(linked)
+
+
+async def test_list_item_with_four_sentences_is_long_paragraph():
+    """Each list item is its own unit: four sentences in one item is too long."""
+    text = (
+        "Anh nên làm mấy việc này:\n"
+        "- Kiểm tra máy. Thay dầu nha. Rửa xe luôn. Hẹn thợ sáng mai.\n"
+        "- Mua thêm nước. Anh thấy sao?"
+    )
+    assert GUARD.tito_guard_trigger(text) == "long_paragraph", GUARD.tito_guard_trigger(text)
+
+
+async def test_short_list_items_are_fine():
+    """A list of short items passes: the limit is per item, not per block."""
+    text = (
+        "Anh nên làm mấy việc này:\n"
+        "- Kiểm tra máy. Thay dầu nha. Rửa xe luôn.\n"
+        "- Mua nước. Hẹn thợ nha.\n"
+        "- Lấy thuốc. Gọi con nha. Anh thấy sao?"
+    )
+    assert GUARD.tito_guard_trigger(text) is None, GUARD.tito_guard_trigger(text)
+
+
 async def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:
