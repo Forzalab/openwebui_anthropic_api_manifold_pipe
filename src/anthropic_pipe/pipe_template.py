@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.2
+version: 0.11.3
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.3
+- Tito per-turn VN reminder (valve `TITO_VN_REMINDER`, default empty = off): one extra text block appended to the last user message of the first request of each turn, after the prompt-cache breakpoints. It carries no cache_control, is removed before the next tool-loop iteration, and is never logged (only its length).
+
 v0.11.2
 - Tito output guard sends `thinking: {"type": "disabled"}` explicitly, since Haiku 5.5 thinks by default and that added latency and parse failures (thinking ate max_tokens).
 
@@ -1040,6 +1043,12 @@ class Pipe:
             description="Tito only. When > 0, base64 images in the outgoing request whose longest side is larger "
             "are resized to this many pixels (aspect kept, LANCZOS). JPEG q85 unless the image has transparency. "
             "0 = off. A failing image is sent unchanged and logged as one WARNING without content.",
+        )
+        TITO_VN_REMINDER: str = Field(
+            default="",
+            description="Tito only. Text appended as one extra block to the last user message of the first "
+            "request of each turn, after the prompt-cache breakpoints, so the cached prefix never changes. "
+            "Empty = off. Not logged.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,

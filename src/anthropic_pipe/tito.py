@@ -518,6 +518,73 @@ class PipeTitoMethods:
             )
         state[chat_id] = (tools_sha, system_sha)
 
+    def _tito_vn_reminder_apply(self, payload: dict):
+        """Append the Tito per-turn VN reminder after the cache breakpoints.
+
+        Called only for Tito, tool-loop iteration 1, after ``_apply_cache_control``.
+        The reminder is one text block (no cache_control) appended to the last
+        user message, so every breakpoint still ends before it and the cached
+        prefix bytes do not change. A str content becomes a one-block list, the
+        only byte change to that message; it is safe only because no breakpoint
+        sits on a later message, so the case is skipped otherwise. Returns a state
+        for ``_tito_vn_reminder_remove``, or None. Never logs the text.
+        """
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is None or not _tito_cv.get():
+            return None
+        text = str(getattr(self.valves, "TITO_VN_REMINDER", "") or "").strip()
+        if not text:
+            return None
+        try:
+            messages = payload.get("messages") or []
+            target = None
+            for idx in range(len(messages) - 1, -1, -1):
+                msg = messages[idx]
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    target = idx
+                    break
+            if target is None:
+                return None
+            for later in messages[target + 1:]:
+                content = later.get("content") if isinstance(later, dict) else None
+                if isinstance(content, list) and any(
+                    isinstance(b, dict) and "cache_control" in b for b in content
+                ):
+                    logger.info("[TITO] vn_reminder skipped: breakpoint after last user message")
+                    return None
+            msg = messages[target]
+            original = msg.get("content")
+            if isinstance(original, str):
+                content = [{"type": "text", "text": original}]
+                msg["content"] = content
+            elif isinstance(original, list):
+                content = original
+            else:
+                return None
+            block = {"type": "text", "text": text}
+            content.append(block)
+            logger.info("[TITO] vn_reminder chars=%d", len(text))
+            return {"block": block, "original": original}
+        except Exception as exc:
+            self._tito_err("vn_reminder", exc)
+            return None
+
+    @staticmethod
+    def _tito_vn_reminder_remove(payload: dict, state) -> None:
+        """Drop the reminder block (found by identity) and restore a str content."""
+        if not state:
+            return
+        for msg in payload.get("messages") or []:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for i, block in enumerate(content):
+                if block is state["block"]:
+                    del content[i]
+                    if isinstance(state["original"], str):
+                        msg["content"] = state["original"]
+                    return
+
     def _tito_shrink_images(self, payload: dict) -> dict:
         """Return a payload whose oversized base64 images are downscaled.
 
