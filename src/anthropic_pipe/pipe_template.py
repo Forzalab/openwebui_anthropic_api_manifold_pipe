@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.3
+version: 0.11.4
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.4
+- Tito decide shadow (valve `TITO_DECIDE`, default off): per Tito turn, three flags (smart_consumer, needs_search, ke_anh_nghe) are scored with OpenRouter MSD-1 in parallel, started before the main stream and awaited after it. One `[TITO] decide` line is logged; the reply is never changed or delayed. Any error or timeout falls back to a Vietnamese keyword regex per flag. The key (`TITO_DECIDE_KEY`, encrypted at rest) and message text are never logged.
+
 v0.11.3
 - Tito per-turn VN reminder (valve `TITO_VN_REMINDER`, default empty = off): one extra text block appended to the last user message of the first request of each turn, after the prompt-cache breakpoints. It carries no cache_control, is removed before the next tool-loop iteration, and is never logged (only its length).
 
@@ -1049,6 +1052,22 @@ class Pipe:
             description="Tito only. Text appended as one extra block to the last user message of the first "
             "request of each turn, after the prompt-cache breakpoints, so the cached prefix never changes. "
             "Empty = off. Not logged.",
+        )
+        TITO_DECIDE: bool = Field(
+            default=False,
+            description="Tito only. Shadow mode: per turn, score three flags with OpenRouter MSD-1 and log "
+            "one [TITO] decide line. No effect on the reply. Off = no call.",
+        )
+        TITO_DECIDE_KEY: EncryptedStr = Field(
+            default="",
+            description="Tito only. OpenRouter API key for TITO_DECIDE. Stored encrypted when "
+            "WEBUI_SECRET_KEY is set. Never logged.",
+        )
+        TITO_DECIDE_TIMEOUT_MS: int = Field(
+            default=1500,
+            ge=100,
+            description="Tito only. Timeout in milliseconds for the TITO_DECIDE calls, overall and per flag. "
+            "A timeout falls back to the regex for that flag.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,

@@ -359,6 +359,7 @@ class PipeOrchestratorMethods:
             # =========================================================================
             tool_loop_iteration = 0
             vn_reminder_state = None  # Tito VN reminder, iteration 1 only
+            tito_decide_state = None  # Tito decide shadow (TITO_DECIDE), iteration 1 only
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -397,6 +398,16 @@ class PipeOrchestratorMethods:
                     # Tito VN reminder (valve TITO_VN_REMINDER, default off): one text block
                     # after every cache breakpoint, iteration 1 only. Added after the hash
                     # diff so the logged message hashes match what the next turn sends.
+                    # Tito decide shadow (TITO_DECIDE): start the MSD-1 calls here, before
+                    # the stream, so they run in parallel. Text is read before the VN
+                    # reminder is added. Never awaited here; collected after the reply.
+                    if (
+                        self.TITO_ACTIVE.get()
+                        and tool_loop_iteration == 1
+                        and not is_internal
+                        and tito_decide_state is None
+                    ):
+                        tito_decide_state = self._tito_decide_start(payload_for_stream)
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
                         vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream)
                     # Dump the full (stripped) outgoing payload so we can audit
@@ -1573,6 +1584,12 @@ class PipeOrchestratorMethods:
         # the visible prose; on an accepted edit emit_replace resets the
         # accumulation, so the authoritative replace below and the returned text
         # both carry the edited version. Never blocks or fails the reply.
+        # Tito decide shadow: collect the task started before the stream and log one line.
+        # Bounded by TITO_DECIDE_TIMEOUT_MS; never changes the reply.
+        if tito_decide_state is not None and not is_internal:
+            await self._tito_decide_collect(tito_decide_state)
+            tito_decide_state = None
+
         if not is_internal:
             try:
                 await self._tito_output_guard(
