@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.7
+version: 0.11.8
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,7 @@ Supports:
 
 Changelog (older versions: CHANGELOG.md in the repository):
 v0.11.7
+- Tito decide: casual_chat question rewritten (scenario + literal-listener reading in its own instructions); held-out AUC .99 Jev / .86 MSD on 12 labeled messages.
 - Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
 v0.11.6
 - Tito decide shadow: new input flag `casual_chat` (casual chat about his day or feelings vs. a request for information, advice or a decision; prompt has chat and ask examples; no regex fallback, MSD failure gives no score). New output check `pure_vn` on the visible reply (fully natural Vietnamese, English only for names, brands, short terms and URLs), started with the output guard and logged as one `[TITO] decide_out` line with the guard trigger. Valve `TITO_DECIDE_INJECT` (default off): when on, the input flags are awaited before the main call and the lines of MSD-scored flags above threshold are added as one block in the VN reminder slot. Log only otherwise; fails open.
@@ -12273,9 +12274,10 @@ class Pipe:
                          "no": "The reply works fine from general knowledge or feelings alone"},
         },
         "casual_chat": {
-            "question": "Is the dad just chatting about his day or his feelings, rather than asking for information, advice, or a decision? Chatting examples: 'Nay khách sạn đông quá', 'Hôm qua tôi nấu canh chua', 'Mấy bữa nay trời lạnh'. Asking examples: 'Thuốc này uống mấy viên vây!?', 'Chỗ nào bán phở ngon gần nhà?', 'Cái này tiếng Anh nói sao?'",
-            "criteria": {"yes": "Casual chat about his day or feelings",
-                         "no": "Asking for information, advice, or a decision"},
+            "instructions": "The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad in Fresno to a friendly chat companion. Read it literally: if a very literal listener would answer it directly with a fact, it is a real question; if they would think 'why are you telling me this?', it invites open conversation. A remark about news he read, even with 'is it true?', is usually a morning-coffee chat, not a lookup.",
+            "question": "SCENARIO: An elderly Vietnamese immigrant in Fresno chats with a companion AI about daily life, family, memories, feelings, and news he has read. Given the scenario and the current message, is the user seeking casual, open-ended, or exploratory conversation?",
+            "criteria": {"yes": "Affirmative remark or open statement inviting talk, not a quiz a literal listener would answer.",
+                         "no": "Asks for a fact, definition, price, place, or time that a literal listener answers directly."},
         },
     }
     # Output check: is Tito's visible reply fully natural Vietnamese? No regex fallback.
