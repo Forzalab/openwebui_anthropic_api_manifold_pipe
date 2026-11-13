@@ -23,6 +23,7 @@ import importlib.util
 import json
 import logging
 import re
+import os
 import sys
 import time
 import urllib.request
@@ -428,6 +429,19 @@ def main() -> int:
         assert set(TITO.PipeTitoMethods.TITO_DECIDE_FLAGS) == set(INPUT_FLAGS)
     finally:
         urllib.request.urlopen = real_urlopen
+
+    # Key source: valve wins, env TITO_DECIDE_KEY when the valve is empty, else off.
+    old_env = os.environ.pop("TITO_DECIDE_KEY", None)
+    try:
+        assert not FakePipe(TITO_DECIDE_KEY="")._tito_decide_enabled()
+        os.environ["TITO_DECIDE_KEY"] = "env-key"
+        assert FakePipe(TITO_DECIDE_KEY="")._tito_decide_key() == "env-key"
+        assert FakePipe(TITO_DECIDE_KEY="")._tito_decide_enabled()
+        assert FakePipe(TITO_DECIDE_KEY="valve-key")._tito_decide_key() == "valve-key"
+    finally:
+        os.environ.pop("TITO_DECIDE_KEY", None)
+        if old_env is not None:
+            os.environ["TITO_DECIDE_KEY"] = old_env
 
     print("ok: tito decide step")
     return 0
