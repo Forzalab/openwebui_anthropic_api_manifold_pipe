@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.2
+version: 0.11.3
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.3
+- Tito per-turn VN reminder (valve `TITO_VN_REMINDER`, default empty = off): one extra text block appended to the last user message of the first request of each turn, after the prompt-cache breakpoints. It carries no cache_control, is removed before the next tool-loop iteration, and is never logged (only its length).
+
 v0.11.2
 - Tito output guard sends `thinking: {"type": "disabled"}` explicitly, since Haiku 5.5 thinks by default and that added latency and parse failures (thinking ate max_tokens).
 
@@ -3992,6 +3995,12 @@ class Pipe:
             description="Tito only. When > 0, base64 images in the outgoing request whose longest side is larger "
             "are resized to this many pixels (aspect kept, LANCZOS). JPEG q85 unless the image has transparency. "
             "0 = off. A failing image is sent unchanged and logged as one WARNING without content.",
+        )
+        TITO_VN_REMINDER: str = Field(
+            default="",
+            description="Tito only. Text appended as one extra block to the last user message of the first "
+            "request of each turn, after the prompt-cache breakpoints, so the cached prefix never changes. "
+            "Empty = off. Not logged.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -10157,6 +10166,7 @@ class Pipe:
             # Continues until conversation ends or max tool calls reached
             # =========================================================================
             tool_loop_iteration = 0
+            vn_reminder_state = None  # Tito VN reminder, iteration 1 only
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -10170,6 +10180,11 @@ class Pipe:
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
+                    # Tito VN reminder lives only in iteration 1's request. Drop it
+                    # before breakpoints are re-placed so later iterations never carry it.
+                    if vn_reminder_state is not None:
+                        self._tito_vn_reminder_remove(payload_for_stream, vn_reminder_state)
+                        vn_reminder_state = None
                     # Apply cache breakpoints right before sending to API
                     self._apply_cache_control(
                         payload_for_stream,
@@ -10187,6 +10202,11 @@ class Pipe:
                     # to pinpoint byte-drift that breaks the prompt cache prefix.
                     _diff_chat_id = __metadata__.get("chat_id") if __metadata__ else None
                     self._log_message_hash_diff(_diff_chat_id, payload_for_stream)
+                    # Tito VN reminder (valve TITO_VN_REMINDER, default off): one text block
+                    # after every cache breakpoint, iteration 1 only. Added after the hash
+                    # diff so the logged message hashes match what the next turn sends.
+                    if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
+                        vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream)
                     # Dump the full (stripped) outgoing payload so we can audit
                     # cache_control placement, tool list, message order and byte
                     # drift across turns without logging megabytes of base64.
@@ -12005,6 +12025,73 @@ class Pipe:
                 f"Tito: tools/system fingerprint changed for chat_id={chat_id}"
             )
         state[chat_id] = (tools_sha, system_sha)
+
+    def _tito_vn_reminder_apply(self, payload: dict):
+        """Append the Tito per-turn VN reminder after the cache breakpoints.
+
+        Called only for Tito, tool-loop iteration 1, after ``_apply_cache_control``.
+        The reminder is one text block (no cache_control) appended to the last
+        user message, so every breakpoint still ends before it and the cached
+        prefix bytes do not change. A str content becomes a one-block list, the
+        only byte change to that message; it is safe only because no breakpoint
+        sits on a later message, so the case is skipped otherwise. Returns a state
+        for ``_tito_vn_reminder_remove``, or None. Never logs the text.
+        """
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is None or not _tito_cv.get():
+            return None
+        text = str(getattr(self.valves, "TITO_VN_REMINDER", "") or "").strip()
+        if not text:
+            return None
+        try:
+            messages = payload.get("messages") or []
+            target = None
+            for idx in range(len(messages) - 1, -1, -1):
+                msg = messages[idx]
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    target = idx
+                    break
+            if target is None:
+                return None
+            for later in messages[target + 1:]:
+                content = later.get("content") if isinstance(later, dict) else None
+                if isinstance(content, list) and any(
+                    isinstance(b, dict) and "cache_control" in b for b in content
+                ):
+                    logger.info("[TITO] vn_reminder skipped: breakpoint after last user message")
+                    return None
+            msg = messages[target]
+            original = msg.get("content")
+            if isinstance(original, str):
+                content = [{"type": "text", "text": original}]
+                msg["content"] = content
+            elif isinstance(original, list):
+                content = original
+            else:
+                return None
+            block = {"type": "text", "text": text}
+            content.append(block)
+            logger.info("[TITO] vn_reminder chars=%d", len(text))
+            return {"block": block, "original": original}
+        except Exception as exc:
+            self._tito_err("vn_reminder", exc)
+            return None
+
+    @staticmethod
+    def _tito_vn_reminder_remove(payload: dict, state) -> None:
+        """Drop the reminder block (found by identity) and restore a str content."""
+        if not state:
+            return
+        for msg in payload.get("messages") or []:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for i, block in enumerate(content):
+                if block is state["block"]:
+                    del content[i]
+                    if isinstance(state["original"], str):
+                        msg["content"] = state["original"]
+                    return
 
     def _tito_shrink_images(self, payload: dict) -> dict:
         """Return a payload whose oversized base64 images are downscaled.

@@ -358,6 +358,7 @@ class PipeOrchestratorMethods:
             # Continues until conversation ends or max tool calls reached
             # =========================================================================
             tool_loop_iteration = 0
+            vn_reminder_state = None  # Tito VN reminder, iteration 1 only
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -371,6 +372,11 @@ class PipeOrchestratorMethods:
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
+                    # Tito VN reminder lives only in iteration 1's request. Drop it
+                    # before breakpoints are re-placed so later iterations never carry it.
+                    if vn_reminder_state is not None:
+                        self._tito_vn_reminder_remove(payload_for_stream, vn_reminder_state)
+                        vn_reminder_state = None
                     # Apply cache breakpoints right before sending to API
                     self._apply_cache_control(
                         payload_for_stream,
@@ -388,6 +394,11 @@ class PipeOrchestratorMethods:
                     # to pinpoint byte-drift that breaks the prompt cache prefix.
                     _diff_chat_id = __metadata__.get("chat_id") if __metadata__ else None
                     self._log_message_hash_diff(_diff_chat_id, payload_for_stream)
+                    # Tito VN reminder (valve TITO_VN_REMINDER, default off): one text block
+                    # after every cache breakpoint, iteration 1 only. Added after the hash
+                    # diff so the logged message hashes match what the next turn sends.
+                    if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
+                        vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream)
                     # Dump the full (stripped) outgoing payload so we can audit
                     # cache_control placement, tool list, message order and byte
                     # drift across turns without logging megabytes of base64.
