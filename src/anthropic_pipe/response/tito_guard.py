@@ -191,17 +191,33 @@ def _strip_short_quotes(text: str, english_only: bool = False) -> str:
     return _QUOTE_RE.sub(blank, text)
 
 
+# Unaccented Vietnamese words that are ASCII but are not English: they break a run.
+_VI_PLAIN_TOKENS = frozenset(
+    "anh chi cho nha hay ra xe xem coi tin ban ba ma la co con em ong nay tito".split()
+)
+# A run needs at least this many of these English function words to count.
+_ENGLISH_FUNCTION_WORDS = frozenset(
+    "the a an is are was be to of and for with you your if in on at this that it "
+    "from by or not can will have has would take please do does what how".split()
+)
+_ENGLISH_FUNCTION_MIN = 2
+
+
 def _has_english_run(text: str) -> bool:
-    """True when 5+ consecutive words are pure ASCII letters."""
-    run = 0
+    """True when 5+ consecutive English-looking words include 2+ function words."""
+    run = []
     for raw in text.split():
         word = raw.strip(_WORD_EDGE_CHARS)
-        if word and _ENGLISH_WORD_RE.fullmatch(word):
-            run += 1
-            if run >= _ENGLISH_RUN_WORDS:
+        lowered = word.lower()
+        if word and _ENGLISH_WORD_RE.fullmatch(word) and lowered not in _VI_PLAIN_TOKENS:
+            run.append(lowered)
+            if (
+                len(run) >= _ENGLISH_RUN_WORDS
+                and sum(w in _ENGLISH_FUNCTION_WORDS for w in run) >= _ENGLISH_FUNCTION_MIN
+            ):
                 return True
         else:
-            run = 0
+            run = []
     return False
 
 

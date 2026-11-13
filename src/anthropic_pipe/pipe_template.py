@@ -38,7 +38,7 @@ Supports:
 
 Changelog (older versions: CHANGELOG.md in the repository):
 v0.11.5
-- Tito output guard: Vietnamese-only rule (rule 10: English kept only for names, brands, short terms, URLs and one short English line with its Vietnamese meaning), new trigger `english_sentence` (5+ English words outside URLs, code, links and quotes of 12 words or fewer), list items judged one by one (over 3 sentences = long_paragraph), and multiple_questions ignores a short quoted English line.
+- Tito output guard: Vietnamese-only rule (rule 10: English kept only for names, brands, short terms, URLs and one short English line with its Vietnamese meaning), new trigger `english_sentence` (5+ consecutive English words with 2+ English function words, outside URLs, code, links and quotes of 12 words or fewer; common unaccented Vietnamese words break a run), list items judged one by one (over 3 sentences = long_paragraph), and multiple_questions ignores a short quoted English line.
 
 v0.11.4
 - Tito decide shadow (valve `TITO_DECIDE`, default off): per Tito turn, three flags (smart_consumer, needs_search, ke_anh_nghe) are scored with OpenRouter MSD-1 in parallel, started before the main stream and awaited after it. One `[TITO] decide` line is logged; the reply is never changed or delayed. Any error or timeout falls back to a Vietnamese keyword regex per flag. The key (`TITO_DECIDE_KEY`, encrypted at rest) and message text are never logged.

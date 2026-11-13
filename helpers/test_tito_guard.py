@@ -462,6 +462,33 @@ async def test_short_list_items_are_fine():
     assert GUARD.tito_guard_trigger(text) is None, GUARD.tito_guard_trigger(text)
 
 
+async def test_unaccented_vietnamese_runs_do_not_trigger():
+    """Real false positives: unaccented Vietnamese words are not English."""
+    for fragment in (
+        "Tito ghi ra cho anh nha",
+        "n qua Facebook hay Craigslist",
+        "xe Toyota, Honda hay Mazda",
+        "theo Kelley Blue Book, chi",
+    ):
+        text = f"Anh coi thử: {fragment}. Anh thấy sao?"
+        assert GUARD.tito_guard_trigger(text) is None, (fragment, GUARD.tito_guard_trigger(text))
+
+
+async def test_brand_run_without_function_words_does_not_trigger():
+    """Five or more ASCII words with no English function word are a name list, not a sentence."""
+    text = "Anh coi giá: Kelley Blue Book Honda Civic Mazda Toyota nha. Anh thấy sao?"
+    assert GUARD.tito_guard_trigger(text) is None, GUARD.tito_guard_trigger(text)
+
+
+async def test_real_english_sentence_triggers():
+    """A real English sentence with function words still triggers english_sentence."""
+    text = (
+        "Transfers are free with a paid fare and allow unlimited transfers for 90 minutes. "
+        "Anh thấy sao?"
+    )
+    assert GUARD.tito_guard_trigger(text) == "english_sentence", GUARD.tito_guard_trigger(text)
+
+
 async def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:
