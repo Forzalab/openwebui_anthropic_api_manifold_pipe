@@ -88,6 +88,7 @@ class PipeTitoMethods:
         "soft_cap_default": 15.0,
         "spend_model": None,      # None: sum every chat message's usage (all models)
         "tools_env": "TITO_TOOLS_FILE",
+        "snapshot_heading": TITO_SNAPSHOT_HEADING,
         "hard_cap_text": HARD_CAP_TEXT,
         "error_text": TITO_ERROR_TEXT,
         "missing_tool_text": TITO_MISSING_TOOL_TEXT,
@@ -98,6 +99,8 @@ class PipeTitoMethods:
             **_TITO_PROFILE_TITO,
             "id": "mimi",
             "label": "Mimi",
+            # Must match OWUI backend utils/tito.py TITO_PROFILES["mimi"].
+            "snapshot_heading": "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN",
             "guard": False,
             "decide": False,
             "injects": True,
@@ -345,15 +348,25 @@ class PipeTitoMethods:
         if not isinstance(blk, dict) or blk.get("type", "text") != "text":
             return system
         text = blk.get("text")
-        marker = "\n\n" + cls.TITO_SNAPSHOT_HEADING
-        if not isinstance(text, str) or marker not in text:
+        if not isinstance(text, str):
             return system
-        head, _, tail = text.partition(marker)
-        if not head.strip():
-            return system
-        first = dict(blk, text=head)
-        second = dict(blk, text=cls.TITO_SNAPSHOT_HEADING + tail)
-        return [first, second]
+        # Tito's heading first (unchanged path), then any other profile heading.
+        headings = [cls.TITO_SNAPSHOT_HEADING]
+        for prof in cls.TITO_PROFILES.values():
+            h = prof.get("snapshot_heading")
+            if h and h not in headings:
+                headings.append(h)
+        for heading in headings:
+            marker = "\n\n" + heading
+            if marker not in text:
+                continue
+            head, _, tail = text.partition(marker)
+            if not head.strip():
+                return system
+            first = dict(blk, text=head)
+            second = dict(blk, text=heading + tail)
+            return [first, second]
+        return system
 
     @classmethod
     def _tito_frozen_tools(cls) -> list:

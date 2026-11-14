@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.1
+version: 0.12.2
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.2
+- System split (N1) also matches each profile's memory heading (`snapshot_heading`; mimi = "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN", must match OWUI). Tito heading tried first, unchanged.
+
 v0.12.1
 - Mimi one-turn injections (first user turn of a chat only, same slot as the VN reminder, never logged): goose once per person (no earlier mimi chat; valve `MIMI_GOOSE_INJECT`), otherwise bear news for 1 in `MIMI_BEAR_RATE` chats (valve `MIMI_BEAR_INJECT`, default rate 10, 0 = off). Tito and other models unchanged.
 
@@ -11798,6 +11801,7 @@ class Pipe:
         "soft_cap_default": 15.0,
         "spend_model": None,      # None: sum every chat message's usage (all models)
         "tools_env": "TITO_TOOLS_FILE",
+        "snapshot_heading": TITO_SNAPSHOT_HEADING,
         "hard_cap_text": HARD_CAP_TEXT,
         "error_text": TITO_ERROR_TEXT,
         "missing_tool_text": TITO_MISSING_TOOL_TEXT,
@@ -11808,6 +11812,8 @@ class Pipe:
             **_TITO_PROFILE_TITO,
             "id": "mimi",
             "label": "Mimi",
+            # Must match OWUI backend utils/tito.py TITO_PROFILES["mimi"].
+            "snapshot_heading": "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN",
             "guard": False,
             "decide": False,
             "injects": True,
@@ -12055,15 +12061,25 @@ class Pipe:
         if not isinstance(blk, dict) or blk.get("type", "text") != "text":
             return system
         text = blk.get("text")
-        marker = "\n\n" + cls.TITO_SNAPSHOT_HEADING
-        if not isinstance(text, str) or marker not in text:
+        if not isinstance(text, str):
             return system
-        head, _, tail = text.partition(marker)
-        if not head.strip():
-            return system
-        first = dict(blk, text=head)
-        second = dict(blk, text=cls.TITO_SNAPSHOT_HEADING + tail)
-        return [first, second]
+        # Tito's heading first (unchanged path), then any other profile heading.
+        headings = [cls.TITO_SNAPSHOT_HEADING]
+        for prof in cls.TITO_PROFILES.values():
+            h = prof.get("snapshot_heading")
+            if h and h not in headings:
+                headings.append(h)
+        for heading in headings:
+            marker = "\n\n" + heading
+            if marker not in text:
+                continue
+            head, _, tail = text.partition(marker)
+            if not head.strip():
+                return system
+            first = dict(blk, text=head)
+            second = dict(blk, text=heading + tail)
+            return [first, second]
+        return system
 
     @classmethod
     def _tito_frozen_tools(cls) -> list:
