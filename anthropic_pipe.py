@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.5
+version: 0.12.6
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.6
+- Profile key `hide_thinking` (mimi): thinking stays on but is never shown; the finished block rides the invisible `[anthropic-hidden]` carrier and replays next turn. Tito unchanged.
+
 v0.12.5
 - mimi thinking back on (profile `thinking` True). Deploy only together with the open-webui build where `is_tito_model` covers mimi, which renders the reasoning block folded.
 
@@ -8533,6 +8536,18 @@ class Pipe:
             # the block is never replayed.
             return ""
 
+        # Profile hide_thinking (mimi): no visible reasoning at all. While
+        # streaming emit nothing; when done, emit the block in the invisible
+        # carrier so the next turn can replay it byte-exact.
+        _prof_cv = getattr(self, "TITO_PROFILE", None)
+        _prof = _prof_cv.get() if _prof_cv is not None else None
+        if isinstance(_prof, dict) and _prof.get("hide_thinking"):
+            if duration is None or not signature:
+                return ""
+            return self._format_hidden_block(
+                [{"type": "thinking", "thinking": content, "signature": signature}]
+            )
+
         # Escape content and add > prefix per line (OpenWebUI quota block style)
         escaped_lines = "\n".join(
             f"> {html.escape(line)}" if not line.startswith(">") else html.escape(line)
@@ -11837,7 +11852,8 @@ class Pipe:
         "guard": True,            # output guard (_tito_output_guard) on
         "decide": True,           # TITO_DECIDE shadow / inject / pure_vn on
         "injects": False,         # mimi goose / bear one-turn injections (_tito_mimi_inject) off
-        "thinking": True,         # extended thinking on (TITO_CONFIG thinking); mimi off
+        "thinking": True,         # extended thinking on (TITO_CONFIG thinking)
+        "hide_thinking": False,   # True: thinking rides an invisible carrier, never a <details>
         "vn_reminder_valve": "TITO_VN_REMINDER",
         "hard_cap_env": "TITO_HARD_CAP_USD",
         "hard_cap_default": 22.0,
@@ -11865,6 +11881,9 @@ class Pipe:
             # is_tito_model incl. mimi) renders the reasoning block folded, like
             # Tito. Set False again if mimi runs on an OWUI without that path.
             "thinking": True,
+            # Conduit shows <details type="reasoning"> raw, so mimi's thinking is
+            # sent only as the invisible [anthropic-hidden] carrier (still replayed).
+            "hide_thinking": True,
             "vn_reminder_valve": "MIMI_VN_REMINDER",
             "hard_cap_env": "MIMI_HARD_CAP_USD",
             "hard_cap_default": 10.0,
