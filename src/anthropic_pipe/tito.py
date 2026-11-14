@@ -365,7 +365,8 @@ class PipeTitoMethods:
         path = (os.environ.get(env_name) or "").strip()
         if not path and env_name != "TITO_TOOLS_FILE":
             # mimi falls back to tito's tools file when MIMI_TOOLS_FILE is unset.
-            path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
+            env_name = "TITO_TOOLS_FILE"
+            path = (os.environ.get(env_name) or "").strip()
         problem = None
         err = None
         tools: list = []

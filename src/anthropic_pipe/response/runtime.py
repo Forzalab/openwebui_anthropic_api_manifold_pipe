@@ -500,7 +500,7 @@ class PipeStreamRuntimeSupportMethods:
         emits — that would leak the raw error into the chat.
         """
         raw = f"{type(exception).__name__}: {exception}"
-        logger.error("Tito API error (mapped to Vietnamese): %s", raw)
+        logger.error("%s API error (mapped to Vietnamese): %s", self._tito_label(), raw)
         self._tito_discord_alert(
             f"{self._tito_label()}: Anthropic API error: {self._tito_safe_err(exception)}"
         )

@@ -148,7 +148,7 @@ class PipeOrchestratorMethods:
                 _spend = await self.month_spend_usd(_now)
                 _decision, _hard_text = self._tito_budget_decision(_spend)
                 if _decision == "hard":
-                    logger.warning("Tito hard budget cap reached: spend=%s", _spend)
+                    logger.warning("%s hard budget cap reached: spend=%s", self._tito_label(), _spend)
                     # Return only (like the other Tito error paths); also emitting
                     # the delta would show the text twice.
                     return _hard_text

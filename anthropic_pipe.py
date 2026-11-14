@@ -9787,7 +9787,7 @@ class Pipe:
         emits — that would leak the raw error into the chat.
         """
         raw = f"{type(exception).__name__}: {exception}"
-        logger.error("Tito API error (mapped to Vietnamese): %s", raw)
+        logger.error("%s API error (mapped to Vietnamese): %s", self._tito_label(), raw)
         self._tito_discord_alert(
             f"{self._tito_label()}: Anthropic API error: {self._tito_safe_err(exception)}"
         )
@@ -10095,7 +10095,7 @@ class Pipe:
                 _spend = await self.month_spend_usd(_now)
                 _decision, _hard_text = self._tito_budget_decision(_spend)
                 if _decision == "hard":
-                    logger.warning("Tito hard budget cap reached: spend=%s", _spend)
+                    logger.warning("%s hard budget cap reached: spend=%s", self._tito_label(), _spend)
                     # Return only (like the other Tito error paths); also emitting
                     # the delta would show the text twice.
                     return _hard_text
@@ -12045,7 +12045,8 @@ class Pipe:
         path = (os.environ.get(env_name) or "").strip()
         if not path and env_name != "TITO_TOOLS_FILE":
             # mimi falls back to tito's tools file when MIMI_TOOLS_FILE is unset.
-            path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
+            env_name = "TITO_TOOLS_FILE"
+            path = (os.environ.get(env_name) or "").strip()
         problem = None
         err = None
         tools: list = []
