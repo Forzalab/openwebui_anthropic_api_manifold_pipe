@@ -1,0 +1,408 @@
+"""Tito output guard: one Haiku check of the visible reply text.
+
+Tito's answer is streamed exactly as before. Only when a cheap local pre-check
+finds something that looks like a rule break is ``claude-haiku-5-5`` asked for
+a minimal fix; if the edit passes the safety diff, the pipe replaces the
+message once. Everything that is not visible prose — ``<details>``
+collapsibles, ``[anthropic-hidden-...]`` carriers and ``[](anthropic:...)``
+metadata markers — is kept byte-for-byte; only prose ever reaches Haiku.
+
+Compiled into ``anthropic_pipe.py`` as a module-level generated section
+(``helpers/build_anthropic_pipe.py``).
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+logger = logging.getLogger(__name__)
+
+TITO_GUARD_MODEL = "claude-haiku-5-5"
+
+# Readability limits for the elderly reader. The rule text and the local
+# pre-check read these same numbers, so they cannot drift apart.
+MAX_SENTENCES = 3  # per paragraph, line or list item
+MAX_SENTENCE_WORDS = 25  # whitespace tokens in one sentence
+MAX_UNIT_WORDS = 45  # whitespace tokens in one paragraph, line or list item
+
+_TITO_GUARD_RULES_TEMPLATE = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
+
+1. Exactly ONE question, as the very last sentence, ending with "?". Remove or turn other questions into statements. If there is no question, add ONE short warm question that fits the reply. A "?" inside the English line anh is meant to say out loud does not count as Tito's question.
+2. Tito calls himself "Tito", never "tôi"/"em"/"con". Dad = "anh" / "anh Đính". Mom = "chị Ngân". Son = "thằng Tùng". Never "Tony", never "ông" for Dad.
+3. No talk about tools, data, systems, records, AI, or "bịa/nói bậy". If the reply says it cannot look something up, replace that with a light friend line ("trí nhớ Tito dạo này như cá vàng").
+4. No offer of things Tito can't do: calendar entries, ringing reminders, phone calls. Replace with "để Tito ghi ra cho anh nhớ nha".
+5. No telling him to sleep, rest, stop, or "để mai" unless he said he is tired.
+6. No flattery opener about his question ("câu hỏi hay", "đúng ý").
+7. No lecture or moralizing sentence; keep facts.
+8. Paragraphs: 1 to {MAX_SENTENCES} short sentences, about {MAX_SENTENCE_WORDS} words max each, blank line between. No long dashes (— –); use commas or periods. Each line or paragraph, including each list item: 1 to {MAX_SENTENCES} short sentences, about {MAX_SENTENCE_WORDS} words max each. A very short sentence is fine for emphasis or a new topic. Lists are fine.
+9. Do not quote poems.
+10. Write every sentence in Vietnamese. Translate or paraphrase any English sentence or English quote into natural Vietnamese. Keep English only for: names, brands, model names, short terms anh needs to recognise (e.g. title, smog, KBB), URLs, and ONE short English line meant for anh to say out loud (e.g. a bargaining line) — keep that line in English with its Vietnamese meaning right after in parentheses.
+
+If the text contains a marker like [[TITO-KEEP-1]], keep every marker exactly where it is, exactly once, and do not change it.
+Return JSON only: {"ok": true} if nothing breaks, else {"ok": false, "edited": "<the full fixed text>"}."""
+
+TITO_GUARD_RULES = _TITO_GUARD_RULES_TEMPLATE.replace(
+    "{MAX_SENTENCES}", str(MAX_SENTENCES)
+).replace("{MAX_SENTENCE_WORDS}", str(MAX_SENTENCE_WORDS))
+
+# Invisible parts of the persisted message. Matched spans are never sent to
+# Haiku and are re-inserted from the original string, so they cannot drift.
+_HIDDEN_PATTERNS = (
+    # Any collapsible: tool calls, reasoning, code interpreter, cache trace,
+    # cache diagnostics, compaction.
+    re.compile(r"\n?<details\b[^>]*>.*?</details>\n?", re.DOTALL),
+    # Invisible markdown link-reference carriers (encrypted server-tool blocks).
+    re.compile(r"^[ ]{0,3}\[anthropic-hidden[^\]]*\]:[^\n]*(?:\n|$)", re.MULTILINE),
+    # Inline metadata markers (file anchors, container id, cache-diagnostics id).
+    re.compile(r"[ ]?\[\]\(anthropic:[^)]*\)[ ]?"),
+)
+
+# Marker the model must keep in place between prose fragments. It is checked
+# before the edit is accepted, so a dropped or altered marker rejects the edit.
+_TITO_GUARD_SENTINEL = "\n\n[[TITO-KEEP-{n}]]\n\n"
+
+# Local pre-check: these are the cheap signals that a rule may be broken.
+_FORBIDDEN_WORDS_RE = re.compile(
+    r"công cụ|dữ liệu|hệ thống|bịa|nói bậy|trí tuệ nhân tạo|đi ngủ|để mai",
+    re.IGNORECASE,
+)
+# "AI" is only the acronym: a case-insensitive match would hit the everyday
+# Vietnamese word "ai" (who) in almost every reply.
+_AI_ACRONYM_RE = re.compile(r"\bAI\b")
+# A sentence ends at . ! or ? followed by a space; a closing straight or curly
+# double quote right after the mark still ends it ("...hôm nay." Anh ăn?).
+_SENTENCE_END_RE = re.compile(r'[.!?]["”]?(?=\s)')
+
+_NUMBER_RE = re.compile(r"\d+(?:[.,:/-]\d+)*")
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_DIGIT_TOKEN_RE = re.compile(r"\S*\d\S*")
+
+# English trigger and quote exemptions. A quote of at most 12 words is a short
+# line anh says out loud, so it is exempt; a longer one is still checked.
+_SHORT_QUOTE_WORDS = 12
+_ENGLISH_RUN_WORDS = 5
+_QUOTE_RE = re.compile(r'"([^"\n]*)"|“([^”\n]*)”')
+_NON_ASCII_LATIN_RE = re.compile(r"[À-ỹ]")  # Vietnamese and other accented letters
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+_MD_LINK_RE = re.compile(r"!?\[[^\]\n]*\]\([^)\n]*\)")
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+_WORD_EDGE_CHARS = "*_~#>-+.,!?;:()[]{}\"'“”‘’`"
+# A list item line: "- x", "* x" or "1. x" (the marker must be followed by a space).
+_LIST_ITEM_RE = re.compile(r"(?:[-*]|\d+\.)\s+")
+
+
+def _hidden_spans(content: str) -> list:
+    """Merged, ordered ``(start, end)`` spans of everything that is not prose."""
+    spans = []
+    for pattern in _HIDDEN_PATTERNS:
+        spans.extend((match.start(), match.end()) for match in pattern.finditer(content))
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def split_visible(content: str) -> list:
+    """Split content into ``(is_visible, text)`` segments.
+
+    Hidden segments are exact slices of the input, so concatenating every
+    segment reproduces ``content`` byte-for-byte.
+    """
+    if not content:
+        return []
+    segments = []
+    cursor = 0
+    for start, end in _hidden_spans(content):
+        if start > cursor:
+            segments.append((True, content[cursor:start]))
+        segments.append((False, content[start:end]))
+        cursor = end
+    if cursor < len(content):
+        segments.append((True, content[cursor:]))
+    return segments
+
+
+def visible_text(segments: list) -> str:
+    """Concatenated prose only: every hidden segment dropped."""
+    return "".join(text for is_visible, text in segments if is_visible)
+
+
+def tito_guard_layout(segments: list) -> tuple:
+    """Return ``(text_for_haiku, sentinels)`` for the visible segments only."""
+    visible = [text for is_visible, text in segments if is_visible]
+    if not visible:
+        return "", []
+    sentinels = [
+        _TITO_GUARD_SENTINEL.format(n=index)
+        for index in range(1, len(visible))
+    ]
+    parts = [visible[0]]
+    for sentinel, text in zip(sentinels, visible[1:]):
+        parts.append(sentinel)
+        parts.append(text)
+    return "".join(parts), sentinels
+
+
+def tito_guard_rebuild(segments: list, edited: str) -> "str | None":
+    """Put edited prose back around the original hidden segments.
+
+    Returns None when a sentinel is missing, duplicated or out of order: the
+    safer outcome is then to keep the streamed reply untouched.
+    """
+    expected = sum(1 for is_visible, _ in segments if is_visible)
+    if not expected:
+        return None
+    sentinels = [
+        _TITO_GUARD_SENTINEL.format(n=index) for index in range(1, expected)
+    ]
+    edited_visible = []
+    rest = edited
+    for sentinel in sentinels:
+        if rest.count(sentinel) != 1:
+            return None
+        head, _, rest = rest.partition(sentinel)
+        edited_visible.append(head)
+    edited_visible.append(rest)
+    if len(edited_visible) != expected:
+        return None
+
+    parts = []
+    visible_index = 0
+    for is_visible, text in segments:
+        if is_visible:
+            parts.append(edited_visible[visible_index])
+            visible_index += 1
+        else:
+            parts.append(text)
+    return _CARRIER_NEEDS_BLANK_RE.sub("\\1\n\n", "".join(parts))
+
+
+# A link-reference carrier only stays invisible after a BLANK line (see
+# formatting._format_hidden_block). The edit path can eat that blank line
+# (sentinel partition, model trimming), which renders the base64 as text.
+_CARRIER_NEEDS_BLANK_RE = re.compile(r"([^\n])\n?(?=[ ]{0,3}\[anthropic-hidden[^\]]*\]:)")
+
+
+def _strip_short_quotes(text: str, english_only: bool = False) -> str:
+    """Blank out quoted spans of at most 12 words (English only when asked)."""
+
+    def blank(match: "re.Match") -> str:
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+        if len(inner.split()) > _SHORT_QUOTE_WORDS:
+            return match.group(0)
+        if english_only and _NON_ASCII_LATIN_RE.search(inner):
+            return match.group(0)
+        return " "
+
+    return _QUOTE_RE.sub(blank, text)
+
+
+# Unaccented Vietnamese words that are ASCII but are not English: they break a run.
+_VI_PLAIN_TOKENS = frozenset(
+    "anh chi cho nha hay ra xe xem coi tin ban ba ma la co con em ong nay tito".split()
+)
+# A run needs at least this many of these English function words to count.
+_ENGLISH_FUNCTION_WORDS = frozenset(
+    "the a an is are was be to of and for with you your if in on at this that it "
+    "from by or not can will have has would take please do does what how".split()
+)
+_ENGLISH_FUNCTION_MIN = 2
+
+
+def _has_english_run(text: str) -> bool:
+    """True when 5+ consecutive English-looking words include 2+ function words."""
+    run = []
+    for raw in text.split():
+        word = raw.strip(_WORD_EDGE_CHARS)
+        lowered = word.lower()
+        if word and _ENGLISH_WORD_RE.fullmatch(word) and lowered not in _VI_PLAIN_TOKENS:
+            run.append(lowered)
+            if (
+                len(run) >= _ENGLISH_RUN_WORDS
+                and sum(w in _ENGLISH_FUNCTION_WORDS for w in run) >= _ENGLISH_FUNCTION_MIN
+            ):
+                return True
+        else:
+            run = []
+    return False
+
+
+def _english_scan_text(text: str) -> str:
+    """Visible text with code, markdown links, URLs and short quotes blanked out."""
+    text = _CODE_FENCE_RE.sub(" ", text)
+    text = _CODE_SPAN_RE.sub(" ", text)
+    text = _MD_LINK_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    return _strip_short_quotes(text)
+
+
+def _rule_units(paragraph: str) -> list:
+    """Sentence-count units: each list item alone, the other lines together."""
+    units = []
+    plain = []
+    for line in paragraph.split("\n"):
+        item = line.strip()
+        if _LIST_ITEM_RE.match(item):
+            if plain:
+                units.append("\n".join(plain))
+                plain = []
+            units.append(_LIST_ITEM_RE.sub("", item, count=1))
+        else:
+            plain.append(line)
+    if plain:
+        units.append("\n".join(plain))
+    return units
+
+
+# Trailing sentence punctuation that a URL token may carry ("...values.").
+_URL_TAIL_RE = re.compile(r"[.,;:!?)\]}'\"]*$")
+
+
+def _blank_urls(text: str) -> str:
+    """Replace each URL by a space, keeping any sentence punctuation after it."""
+    return _URL_RE.sub(lambda m: " " + _URL_TAIL_RE.search(m.group(0)).group(0), text)
+
+
+def _long_unit(unit: str) -> bool:
+    """True when one paragraph, line or list item breaks the length limits.
+
+    URLs and short quoted English lines are not counted, as in the other checks.
+    Sentences split on the same rule as before; words are whitespace tokens.
+    """
+    counted = _strip_short_quotes(_blank_urls(unit), english_only=True).strip()
+    if not counted:
+        return False
+    sentences = [part for part in _SENTENCE_END_RE.split(counted) if part.strip()]
+    if len(sentences) > MAX_SENTENCES:
+        return True
+    if any(len(sentence.split()) > MAX_SENTENCE_WORDS for sentence in sentences):
+        return True
+    return len(counted.split()) > MAX_UNIT_WORDS
+
+
+def tito_guard_trigger(text: str) -> "str | None":
+    """Cheap local pre-check: name of the first rule signal, or None when clean."""
+    if not text or not text.strip():
+        return None
+    stripped = text.rstrip(" *\t\r\n")
+    if not stripped.endswith("?"):
+        return "no_final_question"
+    if _strip_short_quotes(text, english_only=True).count("?") > 1:
+        return "multiple_questions"
+    if re.search(r"\btôi\b", text, re.IGNORECASE):
+        return "first_person"
+    if "\u2014" in text or "\u2013" in text:
+        return "long_dash"
+    if _FORBIDDEN_WORDS_RE.search(text) or _AI_ACRONYM_RE.search(text):
+        return "forbidden_word"
+    for paragraph in re.split(r"\n\s*\n", text):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        for unit in _rule_units(paragraph):
+            if _long_unit(unit):
+                return "long_paragraph"
+    if _has_english_run(_english_scan_text(text)):
+        return "english_sentence"
+    return None
+
+
+def _safety_tokens(original: str) -> set:
+    """Numbers, URLs and digit-bearing tokens that an edit must not lose."""
+    tokens = set(_NUMBER_RE.findall(original))
+    tokens.update(
+        url.rstrip(".,;:!?)]}'\"") for url in _URL_RE.findall(original)
+    )
+    for token in _DIGIT_TOKEN_RE.findall(original):
+        tokens.add(token.strip(".,;:!?)]}'\"("))
+    return {token for token in tokens if token}
+
+
+def tito_guard_safety_ok(original: str, edited: str) -> bool:
+    """True when every number, URL and digit-bearing token survived the edit."""
+    return all(token in edited for token in _safety_tokens(original))
+
+
+def _parse_guard_json(text: str):
+    """Extract the JSON object from a Haiku answer, tolerating a markdown fence."""
+    candidate = (text or "").strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```[A-Za-z]*\s*", "", candidate)
+        candidate = re.sub(r"\s*```$", "", candidate)
+    try:
+        data = json.loads(candidate)
+        return data if isinstance(data, dict) else None
+    except (TypeError, ValueError):
+        pass
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(candidate[start : end + 1])
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _guard_response_text(response) -> str:
+    parts = []
+    for block in getattr(response, "content", None) or []:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                parts.append(block.get("text", "") or "")
+        elif getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", "") or "")
+    return "".join(parts)
+
+
+async def guard_verdict(client, visible_text: str, usage_sink: "list | None" = None) -> tuple:
+    """One Haiku call. Returns ``(outcome, edited)``.
+
+    ``outcome`` is ``"kept_ok"`` (nothing breaks), ``"kept_parse"`` (no usable
+    JSON answer), ``"kept_safety"`` (the edit lost a number, URL or digit token)
+    or ``"replace"`` with the edited text. Client exceptions propagate.
+    When ``usage_sink`` is a list, ``(TITO_GUARD_MODEL, response.usage)`` is
+    appended so the caller can price the call.
+    No ``temperature`` is sent: current models reject it.
+    Thinking is disabled explicitly because Haiku 5.5 thinks by default, which added latency and parse failures (thinking ate max_tokens).
+    """
+    if not visible_text or not visible_text.strip():
+        return ("kept_ok", None)
+
+    response = await client.messages.create(
+        model=TITO_GUARD_MODEL,
+        max_tokens=min(8192, max(256, len(visible_text) * 2)),
+        thinking={"type": "disabled"},
+        system=TITO_GUARD_RULES,
+        messages=[{"role": "user", "content": visible_text}],
+    )
+    if usage_sink is not None:
+        usage_sink.append((TITO_GUARD_MODEL, getattr(response, "usage", None)))
+
+    data = _parse_guard_json(_guard_response_text(response))
+    if data is None:
+        return ("kept_parse", None)
+    if data.get("ok") is not False:
+        return ("kept_ok", None)
+    edited = data.get("edited")
+    if not isinstance(edited, str) or not edited.strip():
+        return ("kept_parse", None)
+    if not tito_guard_safety_ok(visible_text, edited):
+        return ("kept_safety", None)
+    return ("replace", edited)
+
+
+async def guard(client, visible_text: str):
+    """One Haiku call. Returns the edited text, or None to keep the original.
+
+    Raises when the client fails; the caller treats every failure as "keep".
+    """
+    outcome, edited = await guard_verdict(client, visible_text)
+    return edited if outcome == "replace" else None

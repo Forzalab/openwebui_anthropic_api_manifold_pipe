@@ -21,7 +21,21 @@ class PipeCacheControlMethods:
         (render order is tools -> system -> messages), so tools/system may be
         longer than messages but never shorter. A configuration that inverts that
         is clamped to the messages TTL rather than sent and silently mis-billed.
+
+        Tito (P6) pins tools/system markers to a 1h TTL regardless of the valve.
+        Tito's message breakpoints follow ``TITO_CONFIG["cache"]["messages_ttl"]``:
+        ``"5m"`` gives a plain 5-minute marker (no ``ttl`` key); when the key is
+        absent they stay 1h as before. 1h tools/system markers precede the 5m
+        message markers in the prompt, so the ordering rule above still holds.
         """
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is not None and _tito_cv.get():
+            _cfg_fn = getattr(self, "_tito_config", None)
+            _tito_cache = (_cfg_fn() if _cfg_fn else {}).get("cache") or {}
+            if scope == "messages" and _tito_cache.get("messages_ttl") == "5m":
+                return {"type": "ephemeral"}
+            return {"type": "ephemeral", "ttl": "1h"}
+
         setting = self.valves.CACHE_TTL
         if scope == "tools_system":
             override = getattr(self.valves, "CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT", "same as CACHE_TTL")
@@ -467,6 +481,12 @@ class PipeCacheControlMethods:
         - Tool_result blocks CAN have cache_control (unless programmatic calling)
         """
         cache_level = self.valves.CACHE_CONTROL
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
+        if tito_active:
+            # P6: Tito's cache scope is pinned to the fullest level — a valve
+            # must never downgrade it to tools-only or disabled.
+            cache_level = "cache tools array, system prompt and messages"
         if cache_level == "cache disabled":
             return
 
@@ -490,7 +510,7 @@ class PipeCacheControlMethods:
         cache_marker = self._cache_control_marker("tools_system")
 
         tools = payload.get("tools", [])
-        if tools:
+        if tools and not tito_active:
             # Find last non-deferred tool for the breakpoint
             placed = False
             for i in range(len(tools) - 1, -1, -1):
@@ -508,12 +528,19 @@ class PipeCacheControlMethods:
         # --- Step 3: Cache system prompt (breakpoint 2) ---
         system = payload.get("system", [])
         if system:
-            # Find last text block with content
-            for i in range(len(system) - 1, -1, -1):
-                block = system[i]
-                if block.get("type") == "text" and block.get("text", "").strip():
-                    block["cache_control"] = cache_marker
-                    break
+            if tito_active:
+                # P6: two system breakpoints (raw prompt + memory snapshot) —
+                # cache_control goes after block1 AND block2.
+                for block in system:
+                    if isinstance(block, dict):
+                        block["cache_control"] = self._cache_control_marker("tools_system")
+            else:
+                # Find last text block with content
+                for i in range(len(system) - 1, -1, -1):
+                    block = system[i]
+                    if block.get("type") == "text" and block.get("text", "").strip():
+                        block["cache_control"] = cache_marker
+                        break
 
         if cache_level == "cache tools array and system prompt":
             return
@@ -664,11 +691,31 @@ class PipeCacheControlMethods:
         """Place the messages breakpoint on the newest message that will replay
         byte-identically next turn, skipping volatile per-request context and
         thinking/redacted_thinking blocks.
+
+        Also skips ``role:"system"`` messages: a mid-conversation system message
+        (PATCH D) must never carry the breakpoint — if the newest message is one,
+        the breakpoint moves to the preceding cacheable message. Non-tito
+        ``messages[]`` never contain system messages, so this is a no-op there.
         """
         if not messages:
             return
 
         last = messages[-1]
+        if isinstance(last, dict) and last.get("role") == "system":
+            for msg in reversed(messages[:-1]):
+                if not isinstance(msg, dict) or msg.get("role") == "system":
+                    continue
+                volatile_at = self._first_volatile_block_index(msg)
+                if volatile_at is not None:
+                    if volatile_at > 0:
+                        self._place_cache_on_last_cacheable_block(
+                            msg.get("content", [])[:volatile_at]
+                        )
+                    return
+                self._place_cache_on_last_cacheable_block(msg.get("content", []))
+                return
+            return
+
         volatile_at = self._first_volatile_block_index(last)
 
         if volatile_at is None:

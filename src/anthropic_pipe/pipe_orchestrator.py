@@ -26,6 +26,10 @@ class PipeOrchestratorMethods:
         # =========================================================================
         # PHASE 1: RESPONSE ACCUMULATION STATE
         # =========================================================================
+        # Tito quiet UI: hide status lines, source chips and info toasts for the
+        # Tito model. Set before StatusEmitter is built so every construction
+        # site sees it; non-Tito requests reset it to False every turn.
+        QUIET_UI.set(self._tito_quiet_ui(__metadata__))
         request_ctx = PipeRequestContext(pipe=self, event_emitter=__event_emitter__)
         final_message = request_ctx.final_message
         emit_event_local = request_ctx.emit_event
@@ -38,6 +42,11 @@ class PipeOrchestratorMethods:
         request_ctx.metadata = __metadata__ or {}
         request_ctx.user = __user__ or {}
         request_ctx.tools = __tools__
+        # Tito (D4): set once per request so deep methods (messages, cache,
+        # runtime) can read it without threading metadata through the call chain.
+        self.TITO_ACTIVE.set(bool(self._is_tito(__metadata__)))
+        # Tito profile (tito / mimi) of this request; None for every other model.
+        self.TITO_PROFILE.set(self._tito_profile(__metadata__))
         # Content-block dispatch. Handlers own one block family each and read
         # everything off request_ctx; families not migrated yet return False and
         # fall through to the inline chain below.
@@ -50,6 +59,7 @@ class PipeOrchestratorMethods:
         # window can be split into invocations without guessing from timestamps —
         # the thing that made the doubled cache-diagnostics block hard to pin down.
         run_id = request_ctx.run_id
+        request_ctx.timing["t0"] = time.monotonic()
         logger.info(
             "[RUN %s] pipe() start chat_id=%s message_id=%s session_id=%s",
             run_id,
@@ -90,9 +100,14 @@ class PipeOrchestratorMethods:
 
             # Publish this user's block visibility preference for the formatters,
             # which are too deep in the call chain to be handed a request context.
-            HIDDEN_BLOCKS.set(
-                self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
-            )
+            if self.TITO_ACTIVE.get():
+                HIDDEN_BLOCKS.set(
+                    frozenset(self._tito_config().get("hide_blocks", []))
+                )
+            else:
+                HIDDEN_BLOCKS.set(
+                    self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
+                )
 
             # Human-in-the-loop tool approval (OpenWebUI 0.11.1+). The mode is a
             # per-conversation chat param; automations, channel replies and
@@ -122,6 +137,34 @@ class PipeOrchestratorMethods:
             # STEP 1: Detect if task model (generate title, tags, follow-ups etc.), handle it separately
             if __task__:
                 return await self._run_task_model_request(body, task=__task__)
+
+            # Tito budget gate (SPEC §6): short-circuit before any client build
+            # or API call. Hard cap returns a fixed Vietnamese message; soft cap
+            # sends one Discord warning per Pacific month.
+            if self.TITO_ACTIVE.get():
+                from datetime import timezone as _tz
+
+                _now = datetime.now(_tz.utc)
+                _spend = await self.month_spend_usd(_now)
+                _decision, _hard_text = self._tito_budget_decision(_spend)
+                if _decision == "hard":
+                    logger.warning("%s hard budget cap reached: spend=%s", self._tito_label(), _spend)
+                    # Return only (like the other Tito error paths); also emitting
+                    # the delta would show the text twice.
+                    return _hard_text
+                if _decision == "soft":
+                    _month_key = self._tito_pacific_month(_now)
+                    _warned = getattr(self, "_tito_soft_warned", None)
+                    if _warned is None:
+                        _warned = set()
+                        self._tito_soft_warned = _warned
+                    # Keyed by profile too, so mimi's soft warning is not hidden by tito's.
+                    _warn_key = (self._tito_active_profile()["id"], _month_key)
+                    if _warn_key not in _warned:
+                        _warned.add(_warn_key)
+                        self._tito_discord_alert(
+                            f"{self._tito_label()}: soft budget cap reached (${_spend:.2f} USD) for {_month_key}"
+                        )
 
             # STEP 2: Await tools if needed
             if inspect.isawaitable(__tools__):
@@ -214,8 +257,15 @@ class PipeOrchestratorMethods:
             # missing tool. With it off, OWUI's search runs and needs the manifest.
             if (
                 __metadata__
-                and __metadata__.get("deferred_tools")
-                and self._native_tool_search_active(body["model"].split("/")[-1], __user__)
+                and (
+                    self.TITO_ACTIVE.get()
+                    or (
+                        __metadata__.get("deferred_tools")
+                        and self._native_tool_search_active(
+                            body["model"].split("/")[-1], __user__
+                        )
+                    )
+                )
             ):
                 for msg in body.get("messages", []):
                     if msg.get("role") == "system" and isinstance(msg.get("content"), str):
@@ -241,7 +291,8 @@ class PipeOrchestratorMethods:
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
-                __user__["valves"].SHOW_TOKEN_COUNT != "Off"
+                self.TITO_ACTIVE.get()
+                or __user__["valves"].SHOW_TOKEN_COUNT != "Off"
                 or body.get("stream_options", {}).get("include_usage", False)
             )
             total_usage: Optional[dict[str, int]] = None
@@ -311,6 +362,9 @@ class PipeOrchestratorMethods:
             # Continues until conversation ends or max tool calls reached
             # =========================================================================
             tool_loop_iteration = 0
+            vn_reminder_state = None  # Tito VN reminder, iteration 1 only
+            tito_decide_state = None  # Tito decide shadow (TITO_DECIDE), iteration 1 only
+            tito_inject_text = ""  # Tito decide INJECT block (TITO_DECIDE_INJECT), iteration 1 only
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -320,19 +374,63 @@ class PipeOrchestratorMethods:
                 # Reset per-iteration state
                 stream_output_tokens = 0
                 stream_web_search_requests = 0
+                stream_advisor_snapshot: dict = {}
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
+                    # Tito VN reminder lives only in iteration 1's request. Drop it
+                    # before breakpoints are re-placed so later iterations never carry it.
+                    if vn_reminder_state is not None:
+                        self._tito_vn_reminder_remove(payload_for_stream, vn_reminder_state)
+                        vn_reminder_state = None
                     # Apply cache breakpoints right before sending to API
                     self._apply_cache_control(
                         payload_for_stream,
                         is_tool_loop=(tool_loop_iteration > 1),
                         iteration=tool_loop_iteration,
                     )
+                    # Tito image shrink (valve TITO_IMAGE_MAX_PX, default off). Runs on
+                    # every iteration because tool results can add images to the list.
+                    if self.TITO_ACTIVE.get() and int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0) > 0:
+                        payload_for_stream["messages"] = self._tito_shrink_images(payload_for_stream)["messages"]
+                    # Tito per-turn fingerprint: one line, warn + Discord on drift.
+                    if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
+                        self._tito_log_fingerprint(payload_for_stream, __metadata__)
                     # Log message-hash diff vs previous request on same chat_id
                     # to pinpoint byte-drift that breaks the prompt cache prefix.
                     _diff_chat_id = __metadata__.get("chat_id") if __metadata__ else None
                     self._log_message_hash_diff(_diff_chat_id, payload_for_stream)
+                    # Tito VN reminder (valve TITO_VN_REMINDER, default off): one text block
+                    # after every cache breakpoint, iteration 1 only. Added after the hash
+                    # diff so the logged message hashes match what the next turn sends.
+                    # Tito decide shadow (TITO_DECIDE): start the MSD-1 calls here, before
+                    # the stream, so they run in parallel. Text is read before the VN
+                    # reminder is added. Never awaited here; collected after the reply.
+                    if (
+                        self.TITO_ACTIVE.get()
+                        and tool_loop_iteration == 1
+                        and not is_internal
+                        and tito_decide_state is None
+                    ):
+                        tito_decide_state = self._tito_decide_start(payload_for_stream)
+                        if tito_decide_state is not None and self._tito_decide_inject_on():
+                            # INJECT: the input result is awaited here, before the main call,
+                            # and its lines join the VN reminder slot. Never raises.
+                            tito_inject_text = await self._tito_decide_inject(tito_decide_state)
+                            tito_decide_state = None
+                    # Mimi one-turn injections (profile "injects": goose once per person,
+                    # else bear news): joined into the same VN reminder slot. Mimi has
+                    # decide off, so tito_inject_text is "" there.
+                    if (
+                        self.TITO_ACTIVE.get()
+                        and tool_loop_iteration == 1
+                        and not is_internal
+                        and self._tito_active_profile().get("injects")
+                    ):
+                        _mimi_inject = await self._tito_mimi_inject(payload_for_stream, __metadata__, __user__)
+                        tito_inject_text = "\n\n".join(part for part in (tito_inject_text, _mimi_inject) if part)
+                    if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
+                        vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream, tito_inject_text)
                     # Dump the full (stripped) outgoing payload so we can audit
                     # cache_control placement, tool list, message order and byte
                     # drift across turns without logging megabytes of base64.
@@ -355,6 +453,9 @@ class PipeOrchestratorMethods:
                     # Fast mode has its own rate limit; fail a fast request
                     # immediately instead of letting the SDK back off, so the
                     # 429 handler below can fall back to standard speed.
+                    if "images" not in request_ctx.timing:
+                        self._tito_count_images(request_ctx, payload_for_stream)
+                    _stream_open = time.monotonic()
                     _stream_client = (
                         client.with_options(max_retries=0)
                         if payload_for_stream.get("speed") == "fast"
@@ -365,6 +466,8 @@ class PipeOrchestratorMethods:
                     ) as stream:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
+                            if "ttfb" not in request_ctx.timing:
+                                request_ctx.timing["ttfb"] = time.monotonic()
                             stream_event_counts[event_type] = stream_event_counts.get(event_type, 0) + 1
                             logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts}")
                             if event_type == "message_start":
@@ -481,6 +584,11 @@ class PipeOrchestratorMethods:
                                             + (current_searches - stream_web_search_requests)
                                         )
                                         stream_web_search_requests = current_searches
+                                        # Advisor sub-inferences (usage.iterations),
+                                        # priced at the advisor model's own rates.
+                                        stream_advisor_snapshot = ModelPricing.record_advisor_iterations(
+                                            usage, total_usage, stream_advisor_snapshot
+                                        )
                                         ModelPricing.record_billing_modifiers(usage, total_usage)
                                         ModelPricing.update_call_output(total_usage, current_output_tokens)
                                 delta = getattr(event, "delta", None)
@@ -555,11 +663,40 @@ class PipeOrchestratorMethods:
                                                 if task_error is not None:
                                                     tool_result = f"Error executing tool '{tool_name}': {task_error}"
 
+                                                # Tito (AC9): a frozen tool whose live callable vanished
+                                                # gets an is_error result + Discord, never a raw English error.
+                                                tito_missing_tool = False
+                                                if self.TITO_ACTIVE.get():
+                                                    _live = (
+                                                        bool(
+                                                            __tools__
+                                                            and tool_name in __tools__
+                                                            and __tools__[tool_name].get("callable")
+                                                        )
+                                                        or bool(
+                                                            builtin_tools
+                                                            and tool_name in builtin_tools
+                                                            and builtin_tools[tool_name].get("callable")
+                                                        )
+                                                    )
+                                                    if not _live:
+                                                        tito_missing_tool = True
+                                                        tool_result = self._tito_missing_tool_result(
+                                                            tool_use_id, tool_name
+                                                        )["content"]
+                                                        self._tito_discord_alert(
+                                                            f"{self._tito_label()}: missing live tool '{tool_name}'"
+                                                        )
+
                                                 # Process tool result through OpenWebUI's handler
                                                 # for Rich UI (HTMLResponse, embeds, files)
                                                 tool_result_embeds = []
                                                 tool_result_files = []
-                                                if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+                                                if (
+                                                    PROCESS_TOOL_RESULT_AVAILABLE
+                                                    and __request__
+                                                    and not tito_missing_tool
+                                                ):
                                                     try:
                                                         tool_result, tool_result_files, tool_result_embeds = (
                                                             await process_tool_result(
@@ -591,11 +728,14 @@ class PipeOrchestratorMethods:
                                                 # completed tool block below.
 
                                                 # Determine if error
-                                                is_error = isinstance(
-                                                    tool_result, str
-                                                ) and (
-                                                    tool_result.startswith("Error:")
-                                                    or tool_result.startswith("Error executing tool")
+                                                is_error = tito_missing_tool or (
+                                                    isinstance(tool_result, str)
+                                                    and (
+                                                        tool_result.startswith("Error:")
+                                                        or tool_result.startswith(
+                                                            "Error executing tool"
+                                                        )
+                                                    )
                                                 )
 
                                                 # Build result block for API
@@ -784,6 +924,8 @@ class PipeOrchestratorMethods:
                                     await self.handle_errors(
                                         stream_error, __event_emitter__
                                     )
+                                    if self.TITO_ACTIVE.get():
+                                        return self._tito_error_text()
                                     return (
                                         final_text()
                                         + f"\n\nAn error occurred: {error_details}"
@@ -798,6 +940,9 @@ class PipeOrchestratorMethods:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
+                        request_ctx.timing["stream"] = request_ctx.timing.get("stream", 0.0) + (
+                            time.monotonic() - _stream_open
+                        )
                     # Log stream event diagnostics
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
@@ -1110,10 +1255,16 @@ class PipeOrchestratorMethods:
                                 f"❌ Truncated stream: max retries ({self.valves.MAX_RETRIES}) exhausted. "
                                 f"Returning error to user."
                             )
-                            await request_ctx.emit_delta(
-                                "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
-                                f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
-                            )
+                            if self.TITO_ACTIVE.get():
+                                self._tito_discord_alert(
+                                    f"{self._tito_label()}: truncated stream, max retries exhausted"
+                                )
+                                await request_ctx.emit_delta(self._tito_error_text())
+                            else:
+                                await request_ctx.emit_delta(
+                                    "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
+                                    f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
+                                )
                     break
 
                 # ---------------------------------------------------------
@@ -1243,6 +1394,8 @@ class PipeOrchestratorMethods:
             raise
         except Exception as e:
             await self.handle_errors(e, __event_emitter__)
+            if self.TITO_ACTIVE.get():
+                return self._tito_error_text()
             return final_text()
 
         # ---------------------------------------------------------
@@ -1260,7 +1413,9 @@ class PipeOrchestratorMethods:
         # renders every key of `message.usage` in the message info tooltip and
         # persists the dict for the analytics page. Absent (not 0) for models
         # with no known rate card.
-        if include_usage and total_usage and getattr(__user__["valves"], "SHOW_COST", True):
+        if include_usage and total_usage and (
+            self.TITO_ACTIVE.get() or getattr(__user__["valves"], "SHOW_COST", True)
+        ):
             cost_breakdown = self._model_pricing().breakdown(body["model"].split("/")[-1], total_usage)
             if cost_breakdown is not None:
                 total_usage["cost_usd"] = round(sum(cost_breakdown.values()), 6)
@@ -1445,6 +1600,41 @@ class PipeOrchestratorMethods:
                 final_message.append(marker_text)
                 logger.debug("Persisted %d metadata marker char(s)", len(marker_text))
 
+        # Tito output guard: the reply is final (the tool loop is done) and the
+        # accumulated message is what OpenWebUI will save. One Haiku check of
+        # the visible prose; on an accepted edit emit_replace resets the
+        # accumulation, so the authoritative replace below and the returned text
+        # both carry the edited version. Never blocks or fails the reply.
+        # Tito decide shadow (TITO_DECIDE): the pure_vn output check starts right
+        # before the guard, runs beside it, and is collected after it. The input
+        # line is collected after the guard too, so the guard never waits on decide.
+        # Bounded by TITO_DECIDE_TIMEOUT_MS; never changes the reply.
+        guard_trigger = "none"
+        tito_out_state = None
+        if not is_internal:
+            tito_out_state = self._tito_decide_out_start(request_ctx, __metadata__)
+            try:
+                guard_trigger = await self._tito_output_guard(
+                    request_ctx,
+                    client,
+                    __metadata__,
+                    total_usage=total_usage if include_usage else None,
+                    pricing=self._model_pricing(),
+                ) or "none"
+            except Exception as _guard_err:
+                logger.warning(
+                    f"{self._tito_tag()} output guard failed (keeping reply): %s", _guard_err
+                )
+            finally:
+                _guard_t0 = request_ctx.timing.pop("guard_t0", None)
+                if _guard_t0 is not None:
+                    request_ctx.timing["guard"] = time.monotonic() - _guard_t0
+        if tito_decide_state is not None and not is_internal:
+            await self._tito_decide_collect(tito_decide_state)
+            tito_decide_state = None
+        if tito_out_state is not None:
+            await self._tito_decide_out_collect(tito_out_state, guard_trigger)
+
         consolidated = final_text()
         # The authoritative content this run hands to OpenWebUI. Comparing the
         # block count here against what ends up persisted in the DB separates a
@@ -1554,5 +1744,20 @@ class PipeOrchestratorMethods:
                 }
             ]
             return completion
+
+        if self.TITO_ACTIVE.get() and not is_internal:
+            self._tito_log_timing(request_ctx, total_usage or {})
+
+        # Tito streams the reply with its usage in the SSE chunks (see
+        # _tito_usage_stream); every other model keeps the plain text return.
+        if (
+            self.TITO_ACTIVE.get()
+            and include_usage
+            and total_usage
+            and body.get("stream", True)
+        ):
+            return self._tito_usage_stream(
+                final_text(), body.get("model", ""), self._public_usage(total_usage)
+            )
 
         return final_text()

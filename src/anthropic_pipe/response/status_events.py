@@ -22,14 +22,43 @@ OpenWebUI's native clickable source list instead of a plain line.
 """
 from __future__ import annotations
 
+import contextvars
 from typing import Any, Awaitable, Callable
+
+# Tito quiet UI, resolved once per request in ``pipe()``. A ContextVar (rather
+# than a StatusEmitter ctor arg at every construction site) keeps the change in
+# one place: the same Pipe object serves concurrent requests. Only status,
+# source and non-error notification events are affected; message/replace and
+# error notifications pass through untouched.
+QUIET_UI: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "anthropic_pipe_quiet_ui", default=False
+)
+
+
+def _should_drop_event(event: dict[str, Any], quiet: bool | None = None) -> bool:
+    """True when the quiet UI hides this event type. Errors always pass."""
+    if quiet is None:
+        quiet = QUIET_UI.get()
+    if not quiet:
+        return False
+    event_type = event.get("type")
+    if event_type in ("status", "source"):
+        return True
+    if event_type == "notification":
+        return (event.get("data") or {}).get("type") != "error"
+    return False
 
 
 class StatusEmitter:
-    def __init__(self, emit_event: Callable[[dict[str, Any]], Awaitable[None]]):
+    def __init__(
+        self,
+        emit_event: Callable[[dict[str, Any]], Awaitable[None]],
+        quiet: bool = False,
+    ):
         """Wrap an OpenWebUI ``emit_event`` callback with dedup state for status events."""
         self._emit_event = emit_event
         self._last_payload: dict[str, Any] | None = None
+        self._quiet = quiet
 
     async def emit(
         self,
@@ -47,6 +76,9 @@ class StatusEmitter:
         of the same kind arrive in a row (web-search answers split prose into many
         text blocks around their citation markers).
         """
+        if self._quiet or QUIET_UI.get():
+            return
+
         data: dict[str, Any] = {"description": description, "done": done}
         if hidden is not None:
             data["hidden"] = hidden
@@ -140,6 +172,7 @@ class StatusEmitter:
 
     async def notification(self, content: str, *, type: str = "warning") -> None:
         """Emit an OpenWebUI ``notification`` event (e.g. warning/error toast)."""
-        await self._emit_event(
-            {"type": "notification", "data": {"type": type, "content": content}}
-        )
+        event = {"type": "notification", "data": {"type": type, "content": content}}
+        if _should_drop_event(event, quiet=(self._quiet or QUIET_UI.get())):
+            return
+        await self._emit_event(event)

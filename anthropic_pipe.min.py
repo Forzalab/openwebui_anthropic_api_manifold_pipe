@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.2
+version: 0.12.6
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,56 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.6
+- Profile key `hide_thinking` (mimi): thinking stays on but is never shown; the finished block rides the invisible `[anthropic-hidden]` carrier and replays next turn. Tito unchanged.
+
+v0.12.5
+- mimi thinking back on (profile `thinking` True). Deploy only together with the open-webui build where `is_tito_model` covers mimi, which renders the reasoning block folded.
+
+v0.12.4
+- Profile key `thinking`: tito keeps extended thinking (unchanged); mimi runs with thinking off, so no reasoning `<details>` carrier reaches clients (Conduit showed it raw).
+
+v0.12.3
+- Tito output guard: paragraphs, lines and list items stay at 1 to 3 sentences (`MAX_SENTENCES` 3, unchanged) and now also get word caps, each sentence at most 25 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 45 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
+
+v0.12.2
+- System split (N1) also matches each profile's memory heading (`snapshot_heading`; mimi = "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN", must match OWUI). Tito heading tried first, unchanged.
+
+v0.12.1
+- Mimi one-turn injections (first user turn of a chat only, same slot as the VN reminder, never logged): goose once per person (no earlier mimi chat; valve `MIMI_GOOSE_INJECT`), otherwise bear news for 1 in `MIMI_BEAR_RATE` chats (valve `MIMI_BEAR_INJECT`, default rate 10, 0 = off). Tito and other models unchanged.
+
+v0.12.0
+- Tito stack is per model: a profile table (`TITO_PROFILES`) keyed by OWUI model id. `tito` keeps today's values exactly. New model `mimi` (the Mimi companion) runs the same stack with its own budget caps (`MIMI_HARD_CAP_USD` 10 / `MIMI_SOFT_CAP_USD` 6), spend sum over its own messages only, its own reminder valve (`MIMI_VN_REMINDER`, default off), its own tools file (`MIMI_TOOLS_FILE`, falls back to `TITO_TOOLS_FILE`), its own Vietnamese texts, and no output guard and no TITO_DECIDE checks. Discord alerts use the profile label.
+
+v0.11.9
+- Tito decide: when the `TITO_DECIDE_KEY` valve is empty, the key is read from env `TITO_DECIDE_KEY` (e.g. a compose `.env`). Valve still wins.
+
+v0.11.8
+- Tito decide: casual_chat question rewritten (scenario + literal-listener reading in its own instructions); held-out AUC .99 Jev / .86 MSD on 12 labeled messages.
+
+v0.11.7
+- Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
+v0.11.6
+- Tito decide shadow: new input flag `casual_chat` (casual chat about his day or feelings vs. a request for information, advice or a decision; prompt has chat and ask examples; no regex fallback, MSD failure gives no score). New output check `pure_vn` on the visible reply (fully natural Vietnamese, English only for names, brands, short terms and URLs), started with the output guard and logged as one `[TITO] decide_out` line with the guard trigger. Valve `TITO_DECIDE_INJECT` (default off): when on, the input flags are awaited before the main call and the lines of MSD-scored flags above threshold are added as one block in the VN reminder slot. Log only otherwise; fails open.
+
+v0.11.5
+- Tito output guard: Vietnamese-only rule (rule 10: English kept only for names, brands, short terms, URLs and one short English line with its Vietnamese meaning), new trigger `english_sentence` (5+ consecutive English words with 2+ English function words, outside URLs, code, links and quotes of 12 words or fewer; common unaccented Vietnamese words break a run), list items judged one by one (over 3 sentences = long_paragraph), and multiple_questions ignores a short quoted English line.
+
+v0.11.4
+- Tito decide shadow (valve `TITO_DECIDE`, default off): per Tito turn, three flags (smart_consumer, needs_search, and a story flag) are scored with OpenRouter MSD-1 in parallel, started before the main stream and awaited after it. One `[TITO] decide` line is logged; the reply is never changed or delayed. Any error or timeout falls back to a Vietnamese keyword regex per flag. The key (`TITO_DECIDE_KEY`, encrypted at rest) and message text are never logged.
+
+v0.11.3
+- Tito per-turn VN reminder (valve `TITO_VN_REMINDER`, default empty = off): one extra text block appended to the last user message of the first request of each turn, after the prompt-cache breakpoints. It carries no cache_control, is removed before the next tool-loop iteration, and is never logged (only its length).
+
+v0.11.2
+- Tito output guard sends `thinking: {"type": "disabled"}` explicitly, since Haiku 5.5 thinks by default and that added latency and parse failures (thinking ate max_tokens).
+
+v0.11.1
+- Tito output guard (valve `TITO_OUTPUT_GUARD`, default on): after a Tito reply finishes, a cheap local pre-check looks for rule breaks (no final question, more than one question, "tôi", long dashes, tool/AI/sleep wording, a paragraph over three sentences). Only then is `claude-haiku-5-5` asked for the smallest fix. An edit that loses a number, URL or digit-bearing token is rejected. On an accepted edit the message is replaced once, keeping every `<details>` block, `[anthropic-hidden-...]` carrier and metadata marker byte-for-byte. Any error leaves the streamed reply untouched; non-Tito models never reach it.
+
+v0.11.0
+- Tito model (OWUI model id `tito`): fixed config (effort medium, adaptive thinking, Opus-5-5 advisor, web_search Fresno/10 uses, tool search off), a frozen tools array loaded from `TITO_TOOLS_FILE`, a Pacific-month budget gate (`TITO_HARD_CAP_USD` 22 / `TITO_SOFT_CAP_USD` 15, fail-open) and Vietnamese-only error mapping. Gated entirely on `__metadata__["model"]["id"] == "tito"`; every other model is byte-for-byte unchanged.
+
 v0.10.2
 - Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
 - Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
@@ -528,6 +578,8 @@ class PipeRequestContext:
 
     run_id: str = field(default_factory=lambda: os.urandom(4).hex())
 
+    timing: dict = field(default_factory=dict)
+
     status: Any = None
     user: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -540,6 +592,8 @@ class PipeRequestContext:
         await self.pipe.emit_event(event, self.event_emitter)
 
     async def emit_delta(self, content: str) -> None:
+        if content and "first_text" not in self.timing:
+            self.timing["first_text"] = time.monotonic()
         await self.emit_event({"type": "message", "data": {"content": content}})
         self.final_message.append(content)
 
@@ -588,6 +642,13 @@ async def create_request_payload(
 
     status = StatusEmitter(__event_emitter__)
 
+    _is_tito_fn = getattr(pipe, "_is_tito", None)
+    is_tito = bool(_is_tito_fn is not None and _is_tito_fn(__metadata__))
+    _tito_cfg = {}
+    if is_tito:
+        _tito_cfg_fn = getattr(pipe, "_tito_config", None)
+        _tito_cfg = _tito_cfg_fn() if callable(_tito_cfg_fn) else (_tito_cfg_fn or {})
+
     actual_model_name = body["model"].split("/")[-1]
     model_info = pipe.get_model_info(actual_model_name)
     max_tokens_limit = model_info["max_tokens"]
@@ -623,7 +684,10 @@ async def create_request_payload(
             return value
 
         body_effort = body.get("reasoning_effort")
-        if body_effort in ("low", "medium", "high", "xhigh", "max"):
+        if is_tito:
+
+            effective_effort = str(_tito_cfg.get("effort") or "medium")
+        elif body_effort in ("low", "medium", "high", "xhigh", "max"):
             effective_effort = _clamp_effort(body_effort)
         else:
             effective_effort = _clamp_effort(__user__["valves"].EFFORT)
@@ -631,8 +695,15 @@ async def create_request_payload(
         effort_config = {"effort": effective_effort}
         logger.debug(f"Effort level set to: {effective_effort}")
 
-    enable_thinking = __user__["valves"].ENABLE_THINKING or __metadata__.get(
-        "anthropic_thinking", False
+    _tito_profile_fn = getattr(pipe, "_tito_profile", None)
+    _tito_prof = (_tito_profile_fn(__metadata__) if (is_tito and callable(_tito_profile_fn)) else None) or {}
+    enable_thinking = (
+        bool(_tito_prof.get("thinking", True))
+        if is_tito
+        else (
+            __user__["valves"].ENABLE_THINKING
+            or __metadata__.get("anthropic_thinking", False)
+        )
     )
     if not enable_thinking and model_info.get("thinking_always_on"):
 
@@ -646,7 +717,10 @@ async def create_request_payload(
         enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
 
-        if model_info["supports_adaptive_thinking"]:
+        if is_tito:
+            thinking_config = dict(_tito_cfg.get("thinking") or {"type": "adaptive"})
+
+        elif model_info["supports_adaptive_thinking"]:
             thinking_config = {"type": "adaptive"}
         else:
             user_budget = __user__["valves"].THINKING_BUDGET_TOKENS
@@ -674,7 +748,7 @@ async def create_request_payload(
             )
 
         thinking_display = __user__["valves"].THINKING_DISPLAY
-        if thinking_display in ("omitted", "summarized", "updates"):
+        if not is_tito and thinking_display in ("omitted", "summarized", "updates"):
             thinking_config["display"] = thinking_display
 
         payload["thinking"] = thinking_config
@@ -942,8 +1016,20 @@ async def create_request_payload(
         payload["container"] = previous_container_id
         logger.info(f"📦 Reusing container from previous turn: {previous_container_id}")
 
-    if __user__["valves"].ENABLE_ADVISOR_TOOL:
+    if is_tito or __user__["valves"].ENABLE_ADVISOR_TOOL:
         beta_headers.append("advisor-tool-2026-03-01")
+
+    if is_tito and any(
+        isinstance(_m, dict)
+        and _m.get("role") == "system"
+        and (
+            _m.get("clear_at") == "next_user_message"
+            or _m.get("mid_conversation") is True
+        )
+        for _m in processed_messages
+    ):
+        if "mid-conversation-system-clear-at-2026-08-21" not in beta_headers:
+            beta_headers.append("mid-conversation-system-clear-at-2026-08-21")
 
     owui_compacted = any(
         isinstance(_b, dict) and "[CONVERSATION SUMMARY]" in str(_b.get("text", ""))
@@ -1146,7 +1232,7 @@ async def create_request_payload(
         _t["name"] for _t in tools_list
         if isinstance(_t, dict) and _t.get("defer_loading") and _t.get("name")
     )
-    if _deferred_names:
+    if _deferred_names and not is_tito:
         _tool_search_nudge = {
             "type": "text",
             "text": (
@@ -1166,7 +1252,11 @@ async def create_request_payload(
             system_messages = [_tool_search_nudge]
 
     _tool_names = {_t.get("name") for _t in tools_list if isinstance(_t, dict)}
-    if (__metadata__ or {}).get("terminal_id") and "code_execution" in _tool_names:
+    if (
+        (__metadata__ or {}).get("terminal_id")
+        and "code_execution" in _tool_names
+        and not is_tito
+    ):
         _terminal_hint = {
             "type": "text",
             "text": (
@@ -1181,6 +1271,10 @@ async def create_request_payload(
                            else ([{"type": "text", "text": str(system_messages)}] if system_messages else []))
         system_messages = system_messages + [_terminal_hint]
 
+    if is_tito and system_messages:
+        _split = getattr(pipe, "_tito_split_system", None)
+        if callable(_split):
+            system_messages = _split(system_messages)
     if system_messages and len(system_messages) > 0:
         payload["system"] = system_messages
 
@@ -1425,10 +1519,31 @@ class HandlerRegistry:
         ctx.state.reset_current_block()
         return handled
 
+QUIET_UI: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "anthropic_pipe_quiet_ui", default=False
+)
+
+def _should_drop_event(event: dict[str, Any], quiet: bool | None = None) -> bool:
+    if quiet is None:
+        quiet = QUIET_UI.get()
+    if not quiet:
+        return False
+    event_type = event.get("type")
+    if event_type in ("status", "source"):
+        return True
+    if event_type == "notification":
+        return (event.get("data") or {}).get("type") != "error"
+    return False
+
 class StatusEmitter:
-    def __init__(self, emit_event: Callable[[dict[str, Any]], Awaitable[None]]):
+    def __init__(
+        self,
+        emit_event: Callable[[dict[str, Any]], Awaitable[None]],
+        quiet: bool = False,
+    ):
         self._emit_event = emit_event
         self._last_payload: dict[str, Any] | None = None
+        self._quiet = quiet
 
     async def emit(
         self,
@@ -1439,6 +1554,9 @@ class StatusEmitter:
         force: bool = False,
         **fields: Any,
     ) -> None:
+        if self._quiet or QUIET_UI.get():
+            return
+
         data: dict[str, Any] = {"description": description, "done": done}
         if hidden is not None:
             data["hidden"] = hidden
@@ -1504,9 +1622,10 @@ class StatusEmitter:
         await self.emit(description, done=True, force=True)
 
     async def notification(self, content: str, *, type: str = "warning") -> None:
-        await self._emit_event(
-            {"type": "notification", "data": {"type": type, "content": content}}
-        )
+        event = {"type": "notification", "data": {"type": type, "content": content}}
+        if _should_drop_event(event, quiet=(self._quiet or QUIET_UI.get())):
+            return
+        await self._emit_event(event)
 
 async def handle_text_block_start(content_block: Any, ctx: Any) -> None:
     await ctx.status.responding()
@@ -2573,6 +2692,316 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
             )
             await ctx.emit_block(standalone)
 
+TITO_GUARD_MODEL = "claude-haiku-5-5"
+
+MAX_SENTENCES = 3
+MAX_SENTENCE_WORDS = 25
+MAX_UNIT_WORDS = 45
+
+_TITO_GUARD_RULES_TEMPLATE = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
+
+1. Exactly ONE question, as the very last sentence, ending with "?". Remove or turn other questions into statements. If there is no question, add ONE short warm question that fits the reply. A "?" inside the English line anh is meant to say out loud does not count as Tito's question.
+2. Tito calls himself "Tito", never "tôi"/"em"/"con". Dad = "anh" / "anh Đính". Mom = "chị Ngân". Son = "thằng Tùng". Never "Tony", never "ông" for Dad.
+3. No talk about tools, data, systems, records, AI, or "bịa/nói bậy". If the reply says it cannot look something up, replace that with a light friend line ("trí nhớ Tito dạo này như cá vàng").
+4. No offer of things Tito can't do: calendar entries, ringing reminders, phone calls. Replace with "để Tito ghi ra cho anh nhớ nha".
+5. No telling him to sleep, rest, stop, or "để mai" unless he said he is tired.
+6. No flattery opener about his question ("câu hỏi hay", "đúng ý").
+7. No lecture or moralizing sentence; keep facts.
+8. Paragraphs: 1 to {MAX_SENTENCES} short sentences, about {MAX_SENTENCE_WORDS} words max each, blank line between. No long dashes (— –); use commas or periods. Each line or paragraph, including each list item: 1 to {MAX_SENTENCES} short sentences, about {MAX_SENTENCE_WORDS} words max each. A very short sentence is fine for emphasis or a new topic. Lists are fine.
+9. Do not quote poems.
+10. Write every sentence in Vietnamese. Translate or paraphrase any English sentence or English quote into natural Vietnamese. Keep English only for: names, brands, model names, short terms anh needs to recognise (e.g. title, smog, KBB), URLs, and ONE short English line meant for anh to say out loud (e.g. a bargaining line) — keep that line in English with its Vietnamese meaning right after in parentheses.
+
+If the text contains a marker like [[TITO-KEEP-1]], keep every marker exactly where it is, exactly once, and do not change it.
+Return JSON only: {"ok": true} if nothing breaks, else {"ok": false, "edited": "<the full fixed text>"}."""
+
+TITO_GUARD_RULES = _TITO_GUARD_RULES_TEMPLATE.replace(
+    "{MAX_SENTENCES}", str(MAX_SENTENCES)
+).replace("{MAX_SENTENCE_WORDS}", str(MAX_SENTENCE_WORDS))
+
+_HIDDEN_PATTERNS = (
+
+    re.compile(r"\n?<details\b[^>]*>.*?</details>\n?", re.DOTALL),
+
+    re.compile(r"^[ ]{0,3}\[anthropic-hidden[^\]]*\]:[^\n]*(?:\n|$)", re.MULTILINE),
+
+    re.compile(r"[ ]?\[\]\(anthropic:[^)]*\)[ ]?"),
+)
+
+_TITO_GUARD_SENTINEL = "\n\n[[TITO-KEEP-{n}]]\n\n"
+
+_FORBIDDEN_WORDS_RE = re.compile(
+    r"công cụ|dữ liệu|hệ thống|bịa|nói bậy|trí tuệ nhân tạo|đi ngủ|để mai",
+    re.IGNORECASE,
+)
+
+_AI_ACRONYM_RE = re.compile(r"\bAI\b")
+
+_SENTENCE_END_RE = re.compile(r'[.!?]["”]?(?=\s)')
+
+_NUMBER_RE = re.compile(r"\d+(?:[.,:/-]\d+)*")
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_DIGIT_TOKEN_RE = re.compile(r"\S*\d\S*")
+
+_SHORT_QUOTE_WORDS = 12
+_ENGLISH_RUN_WORDS = 5
+_QUOTE_RE = re.compile(r'"([^"\n]*)"|“([^”\n]*)”')
+_NON_ASCII_LATIN_RE = re.compile(r"[À-ỹ]")
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+_MD_LINK_RE = re.compile(r"!?\[[^\]\n]*\]\([^)\n]*\)")
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+_WORD_EDGE_CHARS = "*_~#>-+.,!?;:()[]{}\"'“”‘’`"
+
+_LIST_ITEM_RE = re.compile(r"(?:[-*]|\d+\.)\s+")
+
+def _hidden_spans(content: str) -> list:
+    spans = []
+    for pattern in _HIDDEN_PATTERNS:
+        spans.extend((match.start(), match.end()) for match in pattern.finditer(content))
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+def split_visible(content: str) -> list:
+    if not content:
+        return []
+    segments = []
+    cursor = 0
+    for start, end in _hidden_spans(content):
+        if start > cursor:
+            segments.append((True, content[cursor:start]))
+        segments.append((False, content[start:end]))
+        cursor = end
+    if cursor < len(content):
+        segments.append((True, content[cursor:]))
+    return segments
+
+def visible_text(segments: list) -> str:
+    return "".join(text for is_visible, text in segments if is_visible)
+
+def tito_guard_layout(segments: list) -> tuple:
+    visible = [text for is_visible, text in segments if is_visible]
+    if not visible:
+        return "", []
+    sentinels = [
+        _TITO_GUARD_SENTINEL.format(n=index)
+        for index in range(1, len(visible))
+    ]
+    parts = [visible[0]]
+    for sentinel, text in zip(sentinels, visible[1:]):
+        parts.append(sentinel)
+        parts.append(text)
+    return "".join(parts), sentinels
+
+def tito_guard_rebuild(segments: list, edited: str) -> "str | None":
+    expected = sum(1 for is_visible, _ in segments if is_visible)
+    if not expected:
+        return None
+    sentinels = [
+        _TITO_GUARD_SENTINEL.format(n=index) for index in range(1, expected)
+    ]
+    edited_visible = []
+    rest = edited
+    for sentinel in sentinels:
+        if rest.count(sentinel) != 1:
+            return None
+        head, _, rest = rest.partition(sentinel)
+        edited_visible.append(head)
+    edited_visible.append(rest)
+    if len(edited_visible) != expected:
+        return None
+
+    parts = []
+    visible_index = 0
+    for is_visible, text in segments:
+        if is_visible:
+            parts.append(edited_visible[visible_index])
+            visible_index += 1
+        else:
+            parts.append(text)
+    return _CARRIER_NEEDS_BLANK_RE.sub("\\1\n\n", "".join(parts))
+
+_CARRIER_NEEDS_BLANK_RE = re.compile(r"([^\n])\n?(?=[ ]{0,3}\[anthropic-hidden[^\]]*\]:)")
+
+def _strip_short_quotes(text: str, english_only: bool = False) -> str:
+
+    def blank(match: "re.Match") -> str:
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+        if len(inner.split()) > _SHORT_QUOTE_WORDS:
+            return match.group(0)
+        if english_only and _NON_ASCII_LATIN_RE.search(inner):
+            return match.group(0)
+        return " "
+
+    return _QUOTE_RE.sub(blank, text)
+
+_VI_PLAIN_TOKENS = frozenset(
+    "anh chi cho nha hay ra xe xem coi tin ban ba ma la co con em ong nay tito".split()
+)
+
+_ENGLISH_FUNCTION_WORDS = frozenset(
+    "the a an is are was be to of and for with you your if in on at this that it "
+    "from by or not can will have has would take please do does what how".split()
+)
+_ENGLISH_FUNCTION_MIN = 2
+
+def _has_english_run(text: str) -> bool:
+    run = []
+    for raw in text.split():
+        word = raw.strip(_WORD_EDGE_CHARS)
+        lowered = word.lower()
+        if word and _ENGLISH_WORD_RE.fullmatch(word) and lowered not in _VI_PLAIN_TOKENS:
+            run.append(lowered)
+            if (
+                len(run) >= _ENGLISH_RUN_WORDS
+                and sum(w in _ENGLISH_FUNCTION_WORDS for w in run) >= _ENGLISH_FUNCTION_MIN
+            ):
+                return True
+        else:
+            run = []
+    return False
+
+def _english_scan_text(text: str) -> str:
+    text = _CODE_FENCE_RE.sub(" ", text)
+    text = _CODE_SPAN_RE.sub(" ", text)
+    text = _MD_LINK_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    return _strip_short_quotes(text)
+
+def _rule_units(paragraph: str) -> list:
+    units = []
+    plain = []
+    for line in paragraph.split("\n"):
+        item = line.strip()
+        if _LIST_ITEM_RE.match(item):
+            if plain:
+                units.append("\n".join(plain))
+                plain = []
+            units.append(_LIST_ITEM_RE.sub("", item, count=1))
+        else:
+            plain.append(line)
+    if plain:
+        units.append("\n".join(plain))
+    return units
+
+_URL_TAIL_RE = re.compile(r"[.,;:!?)\]}'\"]*$")
+
+def _blank_urls(text: str) -> str:
+    return _URL_RE.sub(lambda m: " " + _URL_TAIL_RE.search(m.group(0)).group(0), text)
+
+def _long_unit(unit: str) -> bool:
+    counted = _strip_short_quotes(_blank_urls(unit), english_only=True).strip()
+    if not counted:
+        return False
+    sentences = [part for part in _SENTENCE_END_RE.split(counted) if part.strip()]
+    if len(sentences) > MAX_SENTENCES:
+        return True
+    if any(len(sentence.split()) > MAX_SENTENCE_WORDS for sentence in sentences):
+        return True
+    return len(counted.split()) > MAX_UNIT_WORDS
+
+def tito_guard_trigger(text: str) -> "str | None":
+    if not text or not text.strip():
+        return None
+    stripped = text.rstrip(" *\t\r\n")
+    if not stripped.endswith("?"):
+        return "no_final_question"
+    if _strip_short_quotes(text, english_only=True).count("?") > 1:
+        return "multiple_questions"
+    if re.search(r"\btôi\b", text, re.IGNORECASE):
+        return "first_person"
+    if "\u2014" in text or "\u2013" in text:
+        return "long_dash"
+    if _FORBIDDEN_WORDS_RE.search(text) or _AI_ACRONYM_RE.search(text):
+        return "forbidden_word"
+    for paragraph in re.split(r"\n\s*\n", text):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        for unit in _rule_units(paragraph):
+            if _long_unit(unit):
+                return "long_paragraph"
+    if _has_english_run(_english_scan_text(text)):
+        return "english_sentence"
+    return None
+
+def _safety_tokens(original: str) -> set:
+    tokens = set(_NUMBER_RE.findall(original))
+    tokens.update(
+        url.rstrip(".,;:!?)]}'\"") for url in _URL_RE.findall(original)
+    )
+    for token in _DIGIT_TOKEN_RE.findall(original):
+        tokens.add(token.strip(".,;:!?)]}'\"("))
+    return {token for token in tokens if token}
+
+def tito_guard_safety_ok(original: str, edited: str) -> bool:
+    return all(token in edited for token in _safety_tokens(original))
+
+def _parse_guard_json(text: str):
+    candidate = (text or "").strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```[A-Za-z]*\s*", "", candidate)
+        candidate = re.sub(r"\s*```$", "", candidate)
+    try:
+        data = json.loads(candidate)
+        return data if isinstance(data, dict) else None
+    except (TypeError, ValueError):
+        pass
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(candidate[start : end + 1])
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+def _guard_response_text(response) -> str:
+    parts = []
+    for block in getattr(response, "content", None) or []:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                parts.append(block.get("text", "") or "")
+        elif getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", "") or "")
+    return "".join(parts)
+
+async def guard_verdict(client, visible_text: str, usage_sink: "list | None" = None) -> tuple:
+    if not visible_text or not visible_text.strip():
+        return ("kept_ok", None)
+
+    response = await client.messages.create(
+        model=TITO_GUARD_MODEL,
+        max_tokens=min(8192, max(256, len(visible_text) * 2)),
+        thinking={"type": "disabled"},
+        system=TITO_GUARD_RULES,
+        messages=[{"role": "user", "content": visible_text}],
+    )
+    if usage_sink is not None:
+        usage_sink.append((TITO_GUARD_MODEL, getattr(response, "usage", None)))
+
+    data = _parse_guard_json(_guard_response_text(response))
+    if data is None:
+        return ("kept_parse", None)
+    if data.get("ok") is not False:
+        return ("kept_ok", None)
+    edited = data.get("edited")
+    if not isinstance(edited, str) or not edited.strip():
+        return ("kept_parse", None)
+    if not tito_guard_safety_ok(visible_text, edited):
+        return ("kept_safety", None)
+    return ("replace", edited)
+
+async def guard(client, visible_text: str):
+    outcome, edited = await guard_verdict(client, visible_text)
+    return edited if outcome == "replace" else None
+
 class ModelPricing:
 
     RATES = {
@@ -2744,6 +3173,65 @@ class ModelPricing:
             }
         return call_rates
 
+    @staticmethod
+    def _field(obj: Any, name: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    @classmethod
+    def record_advisor_iterations(cls, usage: Any, total_usage: dict, prior: Optional[dict]) -> dict:
+        snapshot: dict = {}
+        for entry in cls._field(usage, "iterations", None) or ():
+            if cls._field(entry, "type") != "advisor_message":
+                continue
+            model = cls._field(entry, "model")
+            if not isinstance(model, str) or not model:
+                continue
+            cache_creation = cls._field(entry, "cache_creation")
+            write_5m = cls._field(cache_creation, "ephemeral_5m_input_tokens") if cache_creation else None
+            write_1h = cls._field(cache_creation, "ephemeral_1h_input_tokens") if cache_creation else None
+            if write_5m is None and write_1h is None:
+                write_5m = cls._field(entry, "cache_creation_input_tokens")
+            acc = snapshot.setdefault(model, dict.fromkeys(cls.TOKEN_KEYS, 0))
+            for key, value in (
+                ("input", cls._field(entry, "input_tokens")),
+                ("output", cls._field(entry, "output_tokens")),
+                ("cache_write_5m", write_5m),
+                ("cache_write_1h", write_1h),
+                ("cache_read", cls._field(entry, "cache_read_input_tokens")),
+            ):
+                acc[key] += value if isinstance(value, (int, float)) else 0
+        prior = prior or {}
+        tally = total_usage.setdefault("_advisor", {})
+        for model, acc in snapshot.items():
+            before = prior.get(model, {})
+            dest = tally.setdefault(model, dict.fromkeys(cls.TOKEN_KEYS, 0))
+            for key in cls.TOKEN_KEYS:
+                dest[key] += max(acc[key] - before.get(key, 0), 0)
+        return snapshot
+
+    def price_call(self, model_name: str, usage: Any) -> Optional[float]:
+        rates = self.rates_for(model_name)
+        if not rates or usage is None:
+            return None
+        tally: dict = {}
+        self.record_call(
+            tally,
+            input_tokens=self._field(usage, "input_tokens", 0) or 0,
+            output_tokens=self._field(usage, "output_tokens", 0) or 0,
+            cache_write_5m=self._field(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_write_1h=0,
+            cache_read=self._field(usage, "cache_read_input_tokens", 0) or 0,
+        )
+        call = tally["_call_log"][0]
+        threshold = rates.get("long_context_threshold")
+        call_rates = self._call_rates(
+            rates, fast=False, long=bool(threshold) and call["prompt"] > threshold
+        )
+        total = sum(call[key] * call_rates[key] for key in self.TOKEN_KEYS)
+        return round(total / 1_000_000, 6)
+
     def breakdown(self, model_name: str, total_usage: dict) -> Optional[dict]:
         rates = self.rates_for(model_name)
         if not rates:
@@ -2785,6 +3273,17 @@ class ModelPricing:
         components["web_search"] = (
             total_usage.get("_web_search_requests", 0) * self.WEB_SEARCH_REQUEST_USD
         )
+        advisor_usd = 0.0
+        for adv_model, adv_tokens in (total_usage.get("_advisor") or {}).items():
+            adv_rates = self.rates_for(adv_model)
+            if not adv_rates:
+                logger.debug(f"No rate card for advisor model {adv_model}; advisor cost skipped")
+                continue
+            adv_call = self._call_rates(adv_rates, fast=False, long=False)
+            advisor_usd += (
+                sum(adv_tokens.get(k, 0) * adv_call[k] for k in self.TOKEN_KEYS) * geo / 1_000_000
+            )
+        components["advisor"] = advisor_usd
         rounded = {name: round(amount, 6) for name, amount in components.items()}
         return {name: amount for name, amount in rounded.items() if amount}
 
@@ -3001,6 +3500,81 @@ class Pipe:
             default="",
             description="AWS 'Claude on AWS' workspace id. When set, sent as the 'anthropic-workspace-id' "
             "header on every request. Required when ANTHROPIC_BASE_URL points at an aws-external-anthropic endpoint.",
+        )
+        TITO_QUIET_UI: bool = Field(
+            default=True,
+            description="Hide status lines, sources and info notifications when the request model is Tito "
+            "(tito.TITO_MODEL_ID). Errors still show.",
+        )
+        TITO_OUTPUT_GUARD: bool = Field(
+            default=True,
+            description="After a Tito reply finishes, one Haiku check looks for rule breaks in the visible text "
+            "(one final question, no 'tôi', no long dashes, short paragraphs, no tool/AI talk) and replaces the "
+            "message once with a minimal fix. Hidden blocks and metadata markers are kept byte-for-byte. "
+            "Errors never affect the reply.",
+        )
+        TITO_IMAGE_MAX_PX: int = Field(
+            default=0,
+            ge=0,
+            description="Tito only. When > 0, base64 images in the outgoing request whose longest side is larger "
+            "are resized to this many pixels (aspect kept, LANCZOS). JPEG q85 unless the image has transparency. "
+            "0 = off. A failing image is sent unchanged and logged as one WARNING without content.",
+        )
+        TITO_VN_REMINDER: str = Field(
+            default="",
+            description="Tito only. Text appended as one extra block to the last user message of the first "
+            "request of each turn, after the prompt-cache breakpoints, so the cached prefix never changes. "
+            "Empty = off. Not logged.",
+        )
+        MIMI_VN_REMINDER: str = Field(
+            default="",
+            description="Mimi only. Same as TITO_VN_REMINDER, for the mimi model. Empty = off. Not logged.",
+        )
+        MIMI_GOOSE_INJECT: str = Field(
+            default="First meeting with bạn. After the answer, Mimi mentions her new friend once, warmly and briefly: a white goose, soft and squishy, whose neck flops when hugged.",
+            description="Mimi only. One-turn text on the first user turn of a chat, for a user with no earlier "
+            "mimi chat (goose once per person). Empty = off. Not logged.",
+        )
+        MIMI_BEAR_INJECT: str = Field(
+            default="If the mood is light and there is room, Mimi adds one short line of news from the bear forest, her neighbors in the Đà Lạt pines. In health, money or sad moments, the answer and bạn come first and the forest stays quiet.",
+            description="Mimi only. One-turn text on the first user turn of a chat picked by MIMI_BEAR_RATE, when "
+            "no goose fired. Empty = off. Not logged.",
+        )
+        MIMI_BEAR_RATE: int = Field(
+            default=10,
+            ge=0,
+            description="Mimi only. About 1 in N chats gets the bear injection (deterministic per chat id). "
+            "0 = off.",
+        )
+        TITO_DECIDE: bool = Field(
+            default=False,
+            description="Tito only. Shadow mode: per turn, score the input flags and the pure_vn output "
+            "check with OpenRouter MSD-1 and log [TITO] decide lines. No effect on the reply. Off = no call.",
+        )
+        TITO_DECIDE_MODEL: str = Field(
+            default="~typesafe/jev-latest",
+            description="Tito only. Main model id for the TITO_DECIDE calls (OpenRouter decisions endpoint).",
+        )
+        TITO_DECIDE_FALLBACK_MODEL: str = Field(
+            default="microsoft/microsoft-decision-1",
+            description="Tito only. Fallback model id for TITO_DECIDE, asked only when the main model call fails.",
+        )
+        TITO_DECIDE_KEY: EncryptedStr = Field(
+            default="",
+            description="Tito only. OpenRouter API key for TITO_DECIDE. Stored encrypted when "
+            "WEBUI_SECRET_KEY is set. Never logged.",
+        )
+        TITO_DECIDE_TIMEOUT_MS: int = Field(
+            default=1500,
+            ge=100,
+            description="Tito only. Timeout in milliseconds for the TITO_DECIDE calls, overall and per flag. "
+            "A timeout falls back to the regex for that flag.",
+        )
+        TITO_DECIDE_INJECT: bool = Field(
+            default=False,
+            description="Tito only. Needs TITO_DECIDE. Awaits the input flags before the main call (up to "
+            "TITO_DECIDE_TIMEOUT_MS) and adds one line per flag that passes its threshold to the per-turn "
+            "block, after the cache breakpoints. Timeout or regex fallback adds nothing. Off = log only.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -3304,7 +3878,7 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
+        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1", "claude-sonnet-5-5"] = Field(
             default="claude-opus-5",
             description="Advisor model ID.",
         )
@@ -3363,6 +3937,14 @@ class Pipe:
         self._cache_diagnostics_state: Dict[str, str] = {}
 
     def _cache_control_marker(self, scope: str = "messages") -> dict:
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is not None and _tito_cv.get():
+            _cfg_fn = getattr(self, "_tito_config", None)
+            _tito_cache = (_cfg_fn() if _cfg_fn else {}).get("cache") or {}
+            if scope == "messages" and _tito_cache.get("messages_ttl") == "5m":
+                return {"type": "ephemeral"}
+            return {"type": "ephemeral", "ttl": "1h"}
+
         setting = self.valves.CACHE_TTL
         if scope == "tools_system":
             override = getattr(self.valves, "CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT", "same as CACHE_TTL")
@@ -3683,6 +4265,11 @@ class Pipe:
         self, payload: dict, is_tool_loop: bool = False, iteration: int = 1
     ) -> None:
         cache_level = self.valves.CACHE_CONTROL
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
+        if tito_active:
+
+            cache_level = "cache tools array, system prompt and messages"
         if cache_level == "cache disabled":
             return
 
@@ -3700,7 +4287,7 @@ class Pipe:
         cache_marker = self._cache_control_marker("tools_system")
 
         tools = payload.get("tools", [])
-        if tools:
+        if tools and not tito_active:
 
             placed = False
             for i in range(len(tools) - 1, -1, -1):
@@ -3717,12 +4304,18 @@ class Pipe:
 
         system = payload.get("system", [])
         if system:
+            if tito_active:
 
-            for i in range(len(system) - 1, -1, -1):
-                block = system[i]
-                if block.get("type") == "text" and block.get("text", "").strip():
-                    block["cache_control"] = cache_marker
-                    break
+                for block in system:
+                    if isinstance(block, dict):
+                        block["cache_control"] = self._cache_control_marker("tools_system")
+            else:
+
+                for i in range(len(system) - 1, -1, -1):
+                    block = system[i]
+                    if block.get("type") == "text" and block.get("text", "").strip():
+                        block["cache_control"] = cache_marker
+                        break
 
         if cache_level == "cache tools array and system prompt":
             return
@@ -3829,6 +4422,21 @@ class Pipe:
             return
 
         last = messages[-1]
+        if isinstance(last, dict) and last.get("role") == "system":
+            for msg in reversed(messages[:-1]):
+                if not isinstance(msg, dict) or msg.get("role") == "system":
+                    continue
+                volatile_at = self._first_volatile_block_index(msg)
+                if volatile_at is not None:
+                    if volatile_at > 0:
+                        self._place_cache_on_last_cacheable_block(
+                            msg.get("content", [])[:volatile_at]
+                        )
+                    return
+                self._place_cache_on_last_cacheable_block(msg.get("content", []))
+                return
+            return
+
         volatile_at = self._first_volatile_block_index(last)
 
         if volatile_at is None:
@@ -3850,6 +4458,8 @@ class Pipe:
     def _convert_messages_to_claude_format(
         self, raw_messages
     ) -> tuple[list[dict], list[dict], list[str]]:
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
         processed_messages: list[Dict[str, Any]] = []
         extracted_memories = None
         previous_marker_metadata: list[str] = []
@@ -3907,6 +4517,24 @@ class Pipe:
             if not claude_message:
                 continue
             if role == "system":
+
+                if tito_active and msg.get("mid_conversation") is True:
+                    blocks = [
+                        b
+                        for b in claude_message
+                        if isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and b.get("text", "").strip()
+                    ]
+                    if blocks:
+                        processed_messages.append(
+                            {
+                                "role": "system",
+                                "content": blocks,
+                                "clear_at": "next_user_message",
+                            }
+                        )
+                    continue
                 for block in claude_message:
                     text = block["text"]
 
@@ -3946,6 +4574,25 @@ class Pipe:
                                 "text": f"{MEMORY_CONTEXT_APPENDIX_HEADER}{extracted_memories}",
                             }
                         )
+
+        if tito_active:
+            _filtered: list[dict] = []
+            _n = len(processed_messages)
+            for _idx, _m in enumerate(processed_messages):
+                _is_mid = (
+                    isinstance(_m, dict)
+                    and _m.get("role") == "system"
+                    and (
+                        _m.get("mid_conversation") is True
+                        or _m.get("clear_at") == "next_user_message"
+                    )
+                )
+                if _is_mid and _idx < _n - 1:
+                    _next = processed_messages[_idx + 1]
+                    if not (_next.get("role") == "assistant"):
+                        continue
+                _filtered.append(_m)
+            processed_messages = _filtered
 
         last_compaction_idx = -1
         for idx, msg in enumerate(processed_messages):
@@ -4610,6 +5257,11 @@ class Pipe:
         __user__: Dict[str, Any],
         __metadata__: dict[str, Any],
     ) -> tuple[List[dict], set]:
+
+        _is_tito = getattr(self, "_is_tito", None)
+        if _is_tito is not None and _is_tito(__metadata__):
+            return self._convert_tito_tools(actual_model_name, __user__, __metadata__)
+
         claude_tools = []
         tool_names_seen = set()
         api_tool_names = set()
@@ -4974,6 +5626,76 @@ class Pipe:
             logger.debug(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
 
         return claude_tools, api_tool_names
+
+    def _convert_tito_tools(
+        self,
+        actual_model_name: str,
+        __user__: Dict[str, Any],
+        __metadata__: dict[str, Any],
+    ) -> tuple[List[dict], set]:
+        tito_cfg = self._tito_config()
+        tools: List[dict] = []
+        names_seen: set[str] = set()
+
+        frozen_fn = getattr(self, "_tito_frozen_tools", None)
+        frozen = frozen_fn() if frozen_fn is not None else []
+        for t in frozen:
+            if not isinstance(t, dict):
+                continue
+            name = t.get("name")
+            if name and name not in names_seen:
+                tools.append(t)
+                names_seen.add(name)
+
+        advisor_cfg = tito_cfg.get("advisor") or {}
+        if advisor_cfg.get("enabled", True):
+
+            executor = actual_model_name.split("/")[-1]
+            advisor_model = advisor_cfg.get("model") or "claude-opus-5-5"
+            for prefix, model in (tito_cfg.get("advisor_by_executor") or {}).items():
+                if executor.startswith(prefix):
+                    advisor_model = model
+                    break
+            advisor: dict = {
+                "type": "advisor_20260301",
+                "name": "advisor",
+                "model": advisor_model,
+            }
+            max_uses = advisor_cfg.get("max_uses")
+            if max_uses:
+                advisor["max_uses"] = max_uses
+            caching = advisor_cfg.get("caching")
+            if caching and caching != "off":
+                advisor["caching"] = {"type": "ephemeral", "ttl": caching}
+            tools.append(advisor)
+            names_seen.add("advisor")
+
+        web_search_enabled = self.valves.WEB_SEARCH or (__metadata__ or {}).get(
+            "web_search_enforced", False
+        )
+        if web_search_enabled and self.get_model_info(actual_model_name).get(
+            "supports_web_search_tool", True
+        ):
+            ws: dict = {"type": "web_search_20250305", "name": "web_search"}
+            ws["max_uses"] = tito_cfg.get("web_search_max_uses", 3)
+            loc_fields = {
+                k: v for k, v in (tito_cfg.get("user_location") or {}).items() if v
+            }
+            if loc_fields:
+                ws["user_location"] = {"type": "approximate", **loc_fields}
+            tools.append(ws)
+            names_seen.add("web_search")
+
+        if self.valves.WEB_FETCH:
+            wf: dict = {"type": "web_fetch_20250910", "name": "web_fetch"}
+            wf["max_uses"] = tito_cfg.get("web_fetch_max_uses", 2)
+            max_content_tokens = tito_cfg.get("web_fetch_max_content_tokens") or 0
+            if max_content_tokens > 0:
+                wf["max_content_tokens"] = max_content_tokens
+            tools.append(wf)
+            names_seen.add("web_fetch")
+
+        return tools, set()
 
     def _native_tool_search_active(self, actual_model_name: str, __user__: Dict[str, Any]) -> bool:
         if not __user__["valves"].ENABLE_TOOL_SEARCH:
@@ -6252,6 +6974,15 @@ class Pipe:
 
             return ""
 
+        _prof_cv = getattr(self, "TITO_PROFILE", None)
+        _prof = _prof_cv.get() if _prof_cv is not None else None
+        if isinstance(_prof, dict) and _prof.get("hide_thinking"):
+            if duration is None or not signature:
+                return ""
+            return self._format_hidden_block(
+                [{"type": "thinking", "thinking": content, "signature": signature}]
+            )
+
         escaped_lines = "\n".join(
             f"> {html.escape(line)}" if not line.startswith(">") else html.escape(line)
             for line in content.splitlines()
@@ -6983,6 +7714,17 @@ class Pipe:
         max_retries = self.valves.MAX_RETRIES
         status = StatusEmitter(request_ctx.emit_event)
 
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        tito_active = bool(_tito_cv is not None and _tito_cv.get())
+
+        def _final_suffix(default: str) -> str:
+            if not tito_active:
+                return default
+            self._tito_discord_alert(
+                f"{self._tito_label()}: Anthropic API error: {self._tito_safe_err(exc)}"
+            )
+            return self._tito_error_text()
+
         non_retry_map: dict[type[Exception], str] = {
             RateLimitError: f"\n\n⚠️ Rate limit exceeded - maximum retries ({max_retries}) reached. Please try again later.",
             AuthenticationError: f"\n\nError: API key issues. Reason: {getattr(exc, 'message', str(exc))}",
@@ -6995,7 +7737,7 @@ class Pipe:
         for error_type, suffix in non_retry_map.items():
             if isinstance(exc, error_type):
                 await self.handle_errors(exc, request_ctx.event_emitter)
-                return (False, retry_attempts, suffix)
+                return (False, retry_attempts, _final_suffix(suffix))
 
         retryable_with_status: list[tuple[type[Exception], str, str]] = [
             (OverloadedError, "⏳ API overloaded, retrying...", "🔧 API overloaded"),
@@ -7015,12 +7757,16 @@ class Pipe:
                     return (
                         False,
                         retry_attempts,
-                        f"\n\n{fail_label} after {max_retries} attempts. Please check your connection.",
+                        _final_suffix(
+                            f"\n\n{fail_label} after {max_retries} attempts. Please check your connection."
+                        ),
                     )
                 return (
                     False,
                     retry_attempts,
-                    f"\n\n{fail_label} - maximum retries ({max_retries}) reached. Please try again later.",
+                    _final_suffix(
+                        f"\n\n{fail_label} - maximum retries ({max_retries}) reached. Please try again later."
+                    ),
                 )
 
         if isinstance(exc, APIStatusError):
@@ -7040,19 +7786,23 @@ class Pipe:
                 return (
                     False,
                     retry_attempts,
-                    f"\n\n🔧 API overloaded (streaming) - maximum retries ({max_retries}) reached. Please try again later.",
+                    _final_suffix(
+                        f"\n\n🔧 API overloaded (streaming) - maximum retries ({max_retries}) reached. Please try again later."
+                    ),
                 )
             return (
                 False,
                 retry_attempts,
-                f"\n\nError: Anthropic API error. Reason: {getattr(exc, 'message', str(exc))}",
+                _final_suffix(
+                    f"\n\nError: Anthropic API error. Reason: {getattr(exc, 'message', str(exc))}"
+                ),
             )
 
         await self.handle_errors(exc, request_ctx.event_emitter)
         return (
             False,
             retry_attempts,
-            f"\n\nError: {type(exc).__name__} occurred. Reason: {exc}",
+            _final_suffix(f"\n\nError: {type(exc).__name__} occurred. Reason: {exc}"),
         )
 
     async def _apply_sdk_stop_reason_fallback(
@@ -7165,6 +7915,11 @@ class Pipe:
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
 
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is not None and _tito_cv.get():
+            await self._tito_handle_error(exception, __event_emitter__)
+            return
+
         if isinstance(exception, RateLimitError):
             error_msg = "Rate limit exceeded. Please wait before making more requests."
             user_msg = "⚠️ Rate limit reached. Please try again in a moment."
@@ -7262,6 +8017,32 @@ class Pipe:
             __event_emitter__,
         )
 
+    async def _tito_handle_error(
+        self,
+        exception,
+        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ):
+        raw = f"{type(exception).__name__}: {exception}"
+        logger.error("%s API error (mapped to Vietnamese): %s", self._tito_label(), raw)
+        self._tito_discord_alert(
+            f"{self._tito_label()}: Anthropic API error: {self._tito_safe_err(exception)}"
+        )
+
+        await self.emit_event(
+            {
+                "type": "notification",
+                "data": {"type": "error", "content": self._tito_error_text()},
+            },
+            __event_emitter__,
+        )
+        await self.emit_event(
+            {
+                "type": "status",
+                "data": {"description": "❌ Response with Errors", "done": True},
+            },
+            __event_emitter__,
+        )
+
     async def handle_citation(self, event, __event_emitter__, citation_counter=None):
         try:
             logger.debug(
@@ -7323,6 +8104,9 @@ class Pipe:
     ) -> None:
         if __event_emitter__ is None:
             return
+
+        if _should_drop_event(event):
+            return
         try:
             await __event_emitter__(event)
         except Exception as e:
@@ -7378,6 +8162,7 @@ class Pipe:
         __event_call__: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
     ):
 
+        QUIET_UI.set(self._tito_quiet_ui(__metadata__))
         request_ctx = PipeRequestContext(pipe=self, event_emitter=__event_emitter__)
         final_message = request_ctx.final_message
         emit_event_local = request_ctx.emit_event
@@ -7391,11 +8176,16 @@ class Pipe:
         request_ctx.user = __user__ or {}
         request_ctx.tools = __tools__
 
+        self.TITO_ACTIVE.set(bool(self._is_tito(__metadata__)))
+
+        self.TITO_PROFILE.set(self._tito_profile(__metadata__))
+
         handler_registry = HandlerRegistry(default_handlers())
 
         is_internal = False
 
         run_id = request_ctx.run_id
+        request_ctx.timing["t0"] = time.monotonic()
         logger.info(
             "[RUN %s] pipe() start chat_id=%s message_id=%s session_id=%s",
             run_id,
@@ -7425,9 +8215,14 @@ class Pipe:
                 await status.complete("No API Key Set!")
                 return error_msg
 
-            HIDDEN_BLOCKS.set(
-                self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
-            )
+            if self.TITO_ACTIVE.get():
+                HIDDEN_BLOCKS.set(
+                    frozenset(self._tito_config().get("hide_blocks", []))
+                )
+            else:
+                HIDDEN_BLOCKS.set(
+                    self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
+                )
 
             TOOL_APPROVAL.set(
                 (
@@ -7446,6 +8241,30 @@ class Pipe:
 
             if __task__:
                 return await self._run_task_model_request(body, task=__task__)
+
+            if self.TITO_ACTIVE.get():
+                from datetime import timezone as _tz
+
+                _now = datetime.now(_tz.utc)
+                _spend = await self.month_spend_usd(_now)
+                _decision, _hard_text = self._tito_budget_decision(_spend)
+                if _decision == "hard":
+                    logger.warning("%s hard budget cap reached: spend=%s", self._tito_label(), _spend)
+
+                    return _hard_text
+                if _decision == "soft":
+                    _month_key = self._tito_pacific_month(_now)
+                    _warned = getattr(self, "_tito_soft_warned", None)
+                    if _warned is None:
+                        _warned = set()
+                        self._tito_soft_warned = _warned
+
+                    _warn_key = (self._tito_active_profile()["id"], _month_key)
+                    if _warn_key not in _warned:
+                        _warned.add(_warn_key)
+                        self._tito_discord_alert(
+                            f"{self._tito_label()}: soft budget cap reached (${_spend:.2f} USD) for {_month_key}"
+                        )
 
             if inspect.isawaitable(__tools__):
                 __tools__ = await __tools__
@@ -7524,8 +8343,15 @@ class Pipe:
 
             if (
                 __metadata__
-                and __metadata__.get("deferred_tools")
-                and self._native_tool_search_active(body["model"].split("/")[-1], __user__)
+                and (
+                    self.TITO_ACTIVE.get()
+                    or (
+                        __metadata__.get("deferred_tools")
+                        and self._native_tool_search_active(
+                            body["model"].split("/")[-1], __user__
+                        )
+                    )
+                )
             ):
                 for msg in body.get("messages", []):
                     if msg.get("role") == "system" and isinstance(msg.get("content"), str):
@@ -7548,7 +8374,8 @@ class Pipe:
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
-                __user__["valves"].SHOW_TOKEN_COUNT != "Off"
+                self.TITO_ACTIVE.get()
+                or __user__["valves"].SHOW_TOKEN_COUNT != "Off"
                 or body.get("stream_options", {}).get("include_usage", False)
             )
             total_usage: Optional[dict[str, int]] = None
@@ -7588,6 +8415,9 @@ class Pipe:
             await status.waiting()
 
             tool_loop_iteration = 0
+            vn_reminder_state = None
+            tito_decide_state = None
+            tito_inject_text = ""
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -7597,9 +8427,14 @@ class Pipe:
 
                 stream_output_tokens = 0
                 stream_web_search_requests = 0
+                stream_advisor_snapshot: dict = {}
 
                 try:
                     stream_event_counts = {}
+
+                    if vn_reminder_state is not None:
+                        self._tito_vn_reminder_remove(payload_for_stream, vn_reminder_state)
+                        vn_reminder_state = None
 
                     self._apply_cache_control(
                         payload_for_stream,
@@ -7607,8 +8442,37 @@ class Pipe:
                         iteration=tool_loop_iteration,
                     )
 
+                    if self.TITO_ACTIVE.get() and int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0) > 0:
+                        payload_for_stream["messages"] = self._tito_shrink_images(payload_for_stream)["messages"]
+
+                    if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
+                        self._tito_log_fingerprint(payload_for_stream, __metadata__)
+
                     _diff_chat_id = __metadata__.get("chat_id") if __metadata__ else None
                     self._log_message_hash_diff(_diff_chat_id, payload_for_stream)
+
+                    if (
+                        self.TITO_ACTIVE.get()
+                        and tool_loop_iteration == 1
+                        and not is_internal
+                        and tito_decide_state is None
+                    ):
+                        tito_decide_state = self._tito_decide_start(payload_for_stream)
+                        if tito_decide_state is not None and self._tito_decide_inject_on():
+
+                            tito_inject_text = await self._tito_decide_inject(tito_decide_state)
+                            tito_decide_state = None
+
+                    if (
+                        self.TITO_ACTIVE.get()
+                        and tool_loop_iteration == 1
+                        and not is_internal
+                        and self._tito_active_profile().get("injects")
+                    ):
+                        _mimi_inject = await self._tito_mimi_inject(payload_for_stream, __metadata__, __user__)
+                        tito_inject_text = "\n\n".join(part for part in (tito_inject_text, _mimi_inject) if part)
+                    if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
+                        vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream, tito_inject_text)
 
                     if logger.isEnabledFor(logging.DEBUG):
                         try:
@@ -7627,6 +8491,9 @@ class Pipe:
                         except Exception as _pl_err:
                             logger.debug(f"[PAYLOAD] strip/log failed: {_pl_err}")
 
+                    if "images" not in request_ctx.timing:
+                        self._tito_count_images(request_ctx, payload_for_stream)
+                    _stream_open = time.monotonic()
                     _stream_client = (
                         client.with_options(max_retries=0)
                         if payload_for_stream.get("speed") == "fast"
@@ -7637,6 +8504,8 @@ class Pipe:
                     ) as stream:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
+                            if "ttfb" not in request_ctx.timing:
+                                request_ctx.timing["ttfb"] = time.monotonic()
                             stream_event_counts[event_type] = stream_event_counts.get(event_type, 0) + 1
                             logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts}")
                             if event_type == "message_start":
@@ -7719,6 +8588,10 @@ class Pipe:
                                             + (current_searches - stream_web_search_requests)
                                         )
                                         stream_web_search_requests = current_searches
+
+                                        stream_advisor_snapshot = ModelPricing.record_advisor_iterations(
+                                            usage, total_usage, stream_advisor_snapshot
+                                        )
                                         ModelPricing.record_billing_modifiers(usage, total_usage)
                                         ModelPricing.update_call_output(total_usage, current_output_tokens)
                                 delta = getattr(event, "delta", None)
@@ -7790,9 +8663,36 @@ class Pipe:
                                                 if task_error is not None:
                                                     tool_result = f"Error executing tool '{tool_name}': {task_error}"
 
+                                                tito_missing_tool = False
+                                                if self.TITO_ACTIVE.get():
+                                                    _live = (
+                                                        bool(
+                                                            __tools__
+                                                            and tool_name in __tools__
+                                                            and __tools__[tool_name].get("callable")
+                                                        )
+                                                        or bool(
+                                                            builtin_tools
+                                                            and tool_name in builtin_tools
+                                                            and builtin_tools[tool_name].get("callable")
+                                                        )
+                                                    )
+                                                    if not _live:
+                                                        tito_missing_tool = True
+                                                        tool_result = self._tito_missing_tool_result(
+                                                            tool_use_id, tool_name
+                                                        )["content"]
+                                                        self._tito_discord_alert(
+                                                            f"{self._tito_label()}: missing live tool '{tool_name}'"
+                                                        )
+
                                                 tool_result_embeds = []
                                                 tool_result_files = []
-                                                if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+                                                if (
+                                                    PROCESS_TOOL_RESULT_AVAILABLE
+                                                    and __request__
+                                                    and not tito_missing_tool
+                                                ):
                                                     try:
                                                         tool_result, tool_result_files, tool_result_embeds = (
                                                             await process_tool_result(
@@ -7815,11 +8715,14 @@ class Pipe:
                                                         }
                                                     )
 
-                                                is_error = isinstance(
-                                                    tool_result, str
-                                                ) and (
-                                                    tool_result.startswith("Error:")
-                                                    or tool_result.startswith("Error executing tool")
+                                                is_error = tito_missing_tool or (
+                                                    isinstance(tool_result, str)
+                                                    and (
+                                                        tool_result.startswith("Error:")
+                                                        or tool_result.startswith(
+                                                            "Error executing tool"
+                                                        )
+                                                    )
                                                 )
 
                                                 if isinstance(tool_result, str):
@@ -7977,6 +8880,8 @@ class Pipe:
                                     await self.handle_errors(
                                         stream_error, __event_emitter__
                                     )
+                                    if self.TITO_ACTIVE.get():
+                                        return self._tito_error_text()
                                     return (
                                         final_text()
                                         + f"\n\nAn error occurred: {error_details}"
@@ -7989,6 +8894,9 @@ class Pipe:
                                     text_state.chunk_count = 0
 
                         sdk_final_message = stream.current_message_snapshot
+                        request_ctx.timing["stream"] = request_ctx.timing.get("stream", 0.0) + (
+                            time.monotonic() - _stream_open
+                        )
 
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
@@ -8256,10 +9164,16 @@ class Pipe:
                                 f"❌ Truncated stream: max retries ({self.valves.MAX_RETRIES}) exhausted. "
                                 f"Returning error to user."
                             )
-                            await request_ctx.emit_delta(
-                                "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
-                                f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
-                            )
+                            if self.TITO_ACTIVE.get():
+                                self._tito_discord_alert(
+                                    f"{self._tito_label()}: truncated stream, max retries exhausted"
+                                )
+                                await request_ctx.emit_delta(self._tito_error_text())
+                            else:
+                                await request_ctx.emit_delta(
+                                    "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
+                                    f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
+                                )
                     break
 
                 except Exception as e:
@@ -8358,11 +9272,15 @@ class Pipe:
             raise
         except Exception as e:
             await self.handle_errors(e, __event_emitter__)
+            if self.TITO_ACTIVE.get():
+                return self._tito_error_text()
             return final_text()
 
         final_status = "✅ Response Complete"
 
-        if include_usage and total_usage and getattr(__user__["valves"], "SHOW_COST", True):
+        if include_usage and total_usage and (
+            self.TITO_ACTIVE.get() or getattr(__user__["valves"], "SHOW_COST", True)
+        ):
             cost_breakdown = self._model_pricing().breakdown(body["model"].split("/")[-1], total_usage)
             if cost_breakdown is not None:
                 total_usage["cost_usd"] = round(sum(cost_breakdown.values()), 6)
@@ -8511,6 +9429,32 @@ class Pipe:
                 final_message.append(marker_text)
                 logger.debug("Persisted %d metadata marker char(s)", len(marker_text))
 
+        guard_trigger = "none"
+        tito_out_state = None
+        if not is_internal:
+            tito_out_state = self._tito_decide_out_start(request_ctx, __metadata__)
+            try:
+                guard_trigger = await self._tito_output_guard(
+                    request_ctx,
+                    client,
+                    __metadata__,
+                    total_usage=total_usage if include_usage else None,
+                    pricing=self._model_pricing(),
+                ) or "none"
+            except Exception as _guard_err:
+                logger.warning(
+                    f"{self._tito_tag()} output guard failed (keeping reply): %s", _guard_err
+                )
+            finally:
+                _guard_t0 = request_ctx.timing.pop("guard_t0", None)
+                if _guard_t0 is not None:
+                    request_ctx.timing["guard"] = time.monotonic() - _guard_t0
+        if tito_decide_state is not None and not is_internal:
+            await self._tito_decide_collect(tito_decide_state)
+            tito_decide_state = None
+        if tito_out_state is not None:
+            await self._tito_decide_out_collect(tito_out_state, guard_trigger)
+
         consolidated = final_text()
 
         logger.info(
@@ -8588,7 +9532,1137 @@ class Pipe:
             ]
             return completion
 
+        if self.TITO_ACTIVE.get() and not is_internal:
+            self._tito_log_timing(request_ctx, total_usage or {})
+
+        if (
+            self.TITO_ACTIVE.get()
+            and include_usage
+            and total_usage
+            and body.get("stream", True)
+        ):
+            return self._tito_usage_stream(
+                final_text(), body.get("model", ""), self._public_usage(total_usage)
+            )
+
         return final_text()
+
+    """Everything gated on the OWUI model id ``tito``.
+
+    All state that must survive across turns is kept lazily on the instance
+    (``_tito_spend_caches``, ``_tito_soft_warned``, ``_tito_fingerprint_state``)
+    rather than in ``__init__``, so the mixin does not need to touch the
+    template's constructor.
+    """
+
+    TITO_MODEL_ID = "tito"
+
+    TITO_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+        "anthropic_pipe_tito_active", default=False
+    )
+
+    TITO_PROFILE: contextvars.ContextVar = contextvars.ContextVar(
+        "anthropic_pipe_tito_profile", default=None
+    )
+
+    TITO_CONFIG: dict = {
+        "thinking": {"type": "adaptive"},
+        "effort": "medium",
+        "advisor": {"enabled": True, "model": "claude-opus-5-5", "max_uses": 3, "caching": "5m"},
+
+        "advisor_by_executor": {"claude-haiku-": "claude-sonnet-5-5"},
+        "enable_tool_search": False,
+        "hide_blocks": ["advisor", "web_search", "web_fetch"],
+        "web_search_max_uses": 3,
+        "web_fetch_max_uses": 2,
+        "web_fetch_max_content_tokens": 8000,
+        "user_location": {"city": "Fresno"},
+        "cache": {"ttl": "1h", "messages_ttl": "5m", "tools_breakpoint": False, "system_breakpoints": 2},
+        "show_cost": True,
+        "strip_reasoning_effort": True,
+        "skip_tool_search_nudge": True,
+        "skip_terminal_hint": True,
+        "always_strip_tool_manifest": True,
+    }
+
+    TITO_SNAPSHOT_HEADING = "NHỮNG ĐIỀU TITO NHỚ VỀ ANH"
+    _TITO_ALERT_MAX = 500
+    _tito_tools_alerted = False
+    _tito_tools_alert_paths: set = set()
+
+    HARD_CAP_TEXT = "Tito đang nghỉ tới ngày 1 tháng sau. Dori đã biết rồi, ông không cần làm gì."
+    TITO_ERROR_TEXT = "Tito đang bận một chút, ông thử lại sau vài phút nhé."
+    TITO_MISSING_TOOL_TEXT = "Lịch tạm thời không dùng được, ông thử lại lát nữa nhé."
+
+    _TITO_PROFILE_TITO: dict = {
+        "id": "tito",
+        "label": "Tito",
+        "guard": True,
+        "decide": True,
+        "injects": False,
+        "thinking": True,
+        "hide_thinking": False,
+        "vn_reminder_valve": "TITO_VN_REMINDER",
+        "hard_cap_env": "TITO_HARD_CAP_USD",
+        "hard_cap_default": 22.0,
+        "soft_cap_env": "TITO_SOFT_CAP_USD",
+        "soft_cap_default": 15.0,
+        "spend_model": None,
+        "tools_env": "TITO_TOOLS_FILE",
+        "snapshot_heading": TITO_SNAPSHOT_HEADING,
+        "hard_cap_text": HARD_CAP_TEXT,
+        "error_text": TITO_ERROR_TEXT,
+        "missing_tool_text": TITO_MISSING_TOOL_TEXT,
+    }
+    TITO_PROFILES: dict = {
+        "tito": _TITO_PROFILE_TITO,
+        "mimi": {
+            **_TITO_PROFILE_TITO,
+            "id": "mimi",
+            "label": "Mimi",
+
+            "snapshot_heading": "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN",
+            "guard": False,
+            "decide": False,
+            "injects": True,
+
+            "thinking": True,
+
+            "hide_thinking": True,
+            "vn_reminder_valve": "MIMI_VN_REMINDER",
+            "hard_cap_env": "MIMI_HARD_CAP_USD",
+            "hard_cap_default": 10.0,
+            "soft_cap_env": "MIMI_SOFT_CAP_USD",
+            "soft_cap_default": 6.0,
+            "spend_model": "mimi",
+            "tools_env": "MIMI_TOOLS_FILE",
+            "hard_cap_text": "Mimi đi nghỉ tới ngày 1 tháng sau nha bạn. Tùng biết rồi, bạn không cần làm gì hết.",
+            "error_text": "Mimi đang bận xíu, bạn thử lại sau vài phút nha.",
+            "missing_tool_text": "Công cụ này tạm thời chưa dùng được, bạn thử lại lát nữa nha.",
+        },
+    }
+
+    @classmethod
+    def _tito_profile(cls, metadata):
+        model = (metadata or {}).get("model")
+        model_id = model.get("id") if isinstance(model, dict) else None
+        if not isinstance(model_id, str):
+            return None
+        return cls.TITO_PROFILES.get(model_id)
+
+    @classmethod
+    def _is_tito(cls, metadata) -> bool:
+        return cls._tito_profile(metadata) is not None
+
+    @classmethod
+    def _tito_active_profile(cls) -> dict:
+        profile = cls.TITO_PROFILE.get()
+        return profile if profile is not None else cls.TITO_PROFILES["tito"]
+
+    @classmethod
+    def _tito_profile_flag(cls, key: str) -> bool:
+        return bool(cls._tito_active_profile().get(key))
+
+    @classmethod
+    def _tito_label(cls) -> str:
+        return cls._tito_active_profile()["label"]
+
+    @classmethod
+    def _tito_tag(cls) -> str:
+        return f"[{cls._tito_label().upper()}]"
+
+    def _tito_quiet_ui(self, metadata) -> bool:
+        return bool(
+            getattr(self.valves, "TITO_QUIET_UI", True) and self._is_tito(metadata)
+        )
+
+    async def _tito_output_guard(
+        self, request_ctx, client, metadata, total_usage=None, pricing=None
+    ) -> str:
+        if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
+            return "none"
+        profile = self._tito_profile(metadata)
+        if profile is None or not profile.get("guard"):
+            return "none"
+        timing = getattr(request_ctx, "timing", None)
+        if timing is not None:
+            timing["guard_t0"] = time.monotonic()
+
+        usage_sink: list = []
+        outcome = "error"
+        trigger = "none"
+        content = ""
+        visible = ""
+        rebuilt_len = 0
+        try:
+            content = request_ctx.text() or ""
+            segments = split_visible(content)
+            visible = visible_text(segments)
+            found = tito_guard_trigger(visible) if visible.strip() else None
+            if not found:
+                outcome = "clean"
+            else:
+                trigger = found
+                request_text, _sentinels = tito_guard_layout(segments)
+                verdict, edited = await guard_verdict(client, request_text, usage_sink)
+                outcome = verdict
+                if verdict == "replace":
+                    rebuilt = tito_guard_rebuild(segments, edited)
+                    if rebuilt is None:
+                        outcome = "kept_markers"
+                    elif rebuilt == content:
+                        outcome = "kept_ok"
+                    else:
+                        await request_ctx.emit_replace(rebuilt)
+                        rebuilt_len = len(rebuilt)
+                        outcome = "replaced"
+        except Exception as exc:
+            outcome = "error"
+            self._tito_err("output_guard", exc)
+        if total_usage is not None and pricing is not None and usage_sink:
+            try:
+                guard_model, guard_usage = usage_sink[0]
+                guard_usd = pricing.price_call(guard_model, guard_usage)
+                if guard_usd:
+                    total_usage["cost_usd"] = round(total_usage.get("cost_usd", 0.0) + guard_usd, 6)
+                    breakdown = dict(total_usage.get("cost_breakdown_usd") or {})
+                    breakdown["guard"] = round(breakdown.get("guard", 0.0) + guard_usd, 6)
+                    total_usage["cost_breakdown_usd"] = breakdown
+            except Exception as exc:
+                logger.debug(f"{self._tito_tag()} guard cost capture failed: %s", exc)
+        logger.info(
+            f"{self._tito_tag()} output guard outcome=%s trigger=%s chars=%d visible=%d rebuilt=%d",
+            outcome,
+            trigger,
+            len(content),
+            len(visible),
+            rebuilt_len,
+        )
+        return trigger
+
+    def _tito_config(self) -> dict:
+        return dict(self.TITO_CONFIG)
+
+    @staticmethod
+    def _is_mid_conversation_system(msg) -> bool:
+        if not isinstance(msg, dict):
+            return False
+        return msg.get("mid_conversation") is True or (
+            msg.get("role") == "system" and msg.get("clear_at") == "next_user_message"
+        )
+
+    @staticmethod
+    def _tito_cap(env_name: str, default: float) -> float:
+        raw = (os.environ.get(env_name) or "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _tito_budget_decision(cls, month_spend_usd: float):
+        profile = cls._tito_active_profile()
+        hard = cls._tito_cap(profile["hard_cap_env"], profile["hard_cap_default"])
+        soft = cls._tito_cap(profile["soft_cap_env"], profile["soft_cap_default"])
+        if month_spend_usd >= hard:
+            return ("hard", profile["hard_cap_text"])
+        if month_spend_usd >= soft:
+            return ("soft", None)
+        return ("ok", None)
+
+    @staticmethod
+    def _tito_pacific_utc_offset(dt) -> int:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        def _nth_sunday(year: int, month: int, n: int):
+            first = _dt(year, month, 1, tzinfo=_tz.utc)
+            days_to_sunday = (6 - first.weekday()) % 7
+            return first + _td(days=days_to_sunday + (n - 1) * 7)
+
+        dst_start = _nth_sunday(dt.year, 3, 2) + _td(hours=10)
+        dst_end = _nth_sunday(dt.year, 11, 1) + _td(hours=9)
+        return -7 if dst_start <= dt < dst_end else -8
+
+    @classmethod
+    def _tito_pacific_month(cls, dt) -> str:
+        from datetime import timedelta as _td
+
+        offset = cls._tito_pacific_utc_offset(dt)
+        return (dt + _td(hours=offset)).strftime("%Y-%m")
+
+    @staticmethod
+    def _tito_safe_err(exc, limit: int = 500) -> str:
+        import re as _re
+
+        raw = f"{type(exc).__name__}: {exc}"
+        raw = _re.sub(r"https?://\S+", "[url]", raw)
+        raw = _re.sub(r"sk-[A-Za-z0-9_\-]{8,}", "[redacted]", raw)
+        raw = _re.sub(
+            r"(?i)(x-api-key|authorization|api[_-]?key|bearer)(['\"]?\s*[:=]?\s*)(?:Bearer\s+)?[^\s,'\"}]+",
+            r"\1\2[redacted]",
+            raw,
+        )
+        return raw[:limit]
+
+    @classmethod
+    def _tito_err(cls, component: str, exc) -> str:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        now = _dt.now(_tz.utc)
+        local = now + _td(hours=cls._tito_pacific_utc_offset(now))
+        code = f"T{local:%H%M}-{os.urandom(2).hex()}"
+        logger.error("TITO-ERR %s %s %s", code, component, cls._tito_safe_err(exc, limit=200))
+        return code
+
+    @classmethod
+    def _tito_split_system(cls, system):
+        if not isinstance(system, list) or len(system) != 1:
+            return system
+        blk = system[0]
+        if not isinstance(blk, dict) or blk.get("type", "text") != "text":
+            return system
+        text = blk.get("text")
+        if not isinstance(text, str):
+            return system
+
+        headings = [cls.TITO_SNAPSHOT_HEADING]
+        for prof in cls.TITO_PROFILES.values():
+            h = prof.get("snapshot_heading")
+            if h and h not in headings:
+                headings.append(h)
+        for heading in headings:
+            marker = "\n\n" + heading
+            if marker not in text:
+                continue
+            head, _, tail = text.partition(marker)
+            if not head.strip():
+                return system
+            first = dict(blk, text=head)
+            second = dict(blk, text=heading + tail)
+            return [first, second]
+        return system
+
+    @classmethod
+    def _tito_frozen_tools(cls) -> list:
+        profile = cls._tito_active_profile()
+        env_name = profile["tools_env"]
+        path = (os.environ.get(env_name) or "").strip()
+        if not path and env_name != "TITO_TOOLS_FILE":
+
+            env_name = "TITO_TOOLS_FILE"
+            path = (os.environ.get(env_name) or "").strip()
+        problem = None
+        err = None
+        tools: list = []
+        if not path:
+            problem = f"{env_name} is not set"
+        else:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, list):
+                    tools = [t for t in data if isinstance(t, dict)]
+                if not tools:
+                    problem = f"{env_name} {path} has no tools"
+            except Exception as e:
+                err = e
+                problem = f"{env_name} {path} unreadable: {cls._tito_safe_err(e)}"
+        if problem:
+
+            cls._tito_err("tools_file", err if err is not None else RuntimeError(problem))
+
+            alert_key = path or env_name
+            if not cls._tito_tools_alerted and alert_key not in cls._tito_tools_alert_paths:
+                cls._tito_tools_alert_paths.add(alert_key)
+                cls._tito_discord_alert(f"{cls._tito_label()}: frozen tools unavailable: {problem}")
+        return tools
+
+    @classmethod
+    def _strip_cache_control(cls, node):
+        if isinstance(node, dict):
+            return {
+                k: cls._strip_cache_control(v)
+                for k, v in node.items()
+                if k != "cache_control"
+            }
+        if isinstance(node, list):
+            return [cls._strip_cache_control(v) for v in node]
+        return node
+
+    @classmethod
+    def _tito_fingerprint_shas(cls, payload: dict):
+        def _ser(x):
+            if not x:
+                return ""
+            return json.dumps(
+                x, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str
+            )
+
+        tools = cls._strip_cache_control(payload.get("tools") or [])
+        system = cls._strip_cache_control(payload.get("system") or [])
+        tools_sha = hashlib.sha256(_ser(tools).encode("utf-8")).hexdigest()
+        system_sha = hashlib.sha256(_ser(system).encode("utf-8")).hexdigest()
+        return tools_sha, system_sha
+
+    @classmethod
+    def _tito_fingerprint(cls, payload: dict) -> str:
+        tools_sha, system_sha = cls._tito_fingerprint_shas(payload)
+        model = payload.get("model", "")
+        thinking = payload.get("thinking") or {}
+        thinking_s = thinking.get("type", "") if isinstance(thinking, dict) else str(thinking)
+        effort = payload.get("effort", "")
+        if not effort:
+            oc = payload.get("output_config")
+            if isinstance(oc, dict):
+                effort = oc.get("effort", "")
+        betas = payload.get("betas") or []
+        betas_csv = ",".join(betas) if isinstance(betas, list) else str(betas)
+        return (
+            f"sha256_tools={tools_sha} sha256_system={system_sha} "
+            f"model={model} thinking={thinking_s} effort={effort} betas={betas_csv}"
+        )
+
+    @classmethod
+    def _tito_missing_tool_result(cls, tool_use_id: str = "", tool_name: str = "") -> dict:
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": cls._tito_active_profile()["missing_tool_text"],
+            "is_error": True,
+        }
+
+    @classmethod
+    def _tito_error_text(cls) -> str:
+        return cls._tito_active_profile()["error_text"]
+
+    @classmethod
+    def _tito_discord_alert(cls, message: str) -> None:
+        webhook = (os.environ.get("TITO_DISCORD_WEBHOOK") or "").strip()
+        if not webhook:
+            return
+
+        def _send():
+            try:
+                import json as _json
+                import urllib.request as _ur
+
+                data = _json.dumps({"content": message}).encode("utf-8")
+                req = _ur.Request(
+                    webhook,
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                _ur.urlopen(req, timeout=5)
+            except Exception as e:
+                cls._tito_err("discord_alert", e)
+
+        try:
+            import threading as _th
+
+            _th.Thread(target=_send, daemon=True).start()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _tito_chat_messages(chat) -> list:
+        if isinstance(chat, dict):
+            body = chat.get("chat") if isinstance(chat.get("chat"), dict) else chat
+        else:
+            body = getattr(chat, "chat", None)
+        if not isinstance(body, dict):
+            return []
+        msgs = (body.get("history") or {}).get("messages")
+        if isinstance(msgs, dict):
+            return [m for m in msgs.values() if isinstance(m, dict)]
+        return []
+
+    @classmethod
+    def _tito_message_month(cls, msg, dt) -> "str | None":
+        if not isinstance(msg, dict):
+            return None
+        ts = msg.get("timestamp") or msg.get("created_at") or msg.get("updated_at")
+        if ts is None:
+            return None
+        from datetime import datetime as _dt, timezone as _tz
+
+        try:
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_tz.utc)
+                return cls._tito_pacific_month(ts.astimezone(_tz.utc))
+            return cls._tito_pacific_month(
+                _dt.fromtimestamp(float(ts), tz=_tz.utc)
+            )
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
+    @staticmethod
+    def _tito_usage_cost(msg) -> float:
+        if not isinstance(msg, dict):
+            return 0.0
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            return 0.0
+        try:
+            return float(usage.get("cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def month_spend_usd(self, now=None) -> float:
+        if now is None:
+            from datetime import datetime as _dt, timezone as _tz
+
+            now = _dt.now(_tz.utc)
+
+        profile = self._tito_active_profile()
+        cache_key = profile["id"]
+        caches = getattr(self, "_tito_spend_caches", None)
+        if caches is None:
+            caches = {}
+            self._tito_spend_caches = caches
+        cached = caches.get(cache_key)
+        if cached is not None:
+            value, ts = cached
+            if time.time() - ts < 60:
+                return value
+
+        total = 0.0
+        try:
+            chats_cls = globals().get("Chats")
+            if not globals().get("CHATS_AVAILABLE", False) or chats_cls is None:
+                return 0.0
+
+            month_key = self._tito_pacific_month(now)
+            spend_model = profile.get("spend_model")
+            chats = chats_cls.get_chats()
+            if hasattr(chats, "__await__"):
+                chats = await chats
+            for chat in chats or []:
+                for msg in self._tito_chat_messages(chat):
+                    if self._tito_message_month(msg, now) != month_key:
+                        continue
+                    if spend_model is not None and self._tito_message_model(msg) != spend_model:
+                        continue
+                    total += self._tito_usage_cost(msg)
+        except Exception as e:
+            total = 0.0
+            self._tito_err("month_spend", e)
+            self._tito_discord_alert(
+                f"{self._tito_label()}: month_spend_usd DB error (fail-open): {self._tito_safe_err(e)}"
+            )
+
+        caches[cache_key] = (total, time.time())
+        return total
+
+    @staticmethod
+    def _tito_message_model(msg) -> str:
+        if not isinstance(msg, dict):
+            return ""
+        model = msg.get("model")
+        if isinstance(model, str) and model:
+            return model
+        info = msg.get("info")
+        if isinstance(info, dict) and isinstance(info.get("model"), str):
+            return info["model"]
+        return ""
+
+    @staticmethod
+    def _tito_chat_owner(chat) -> tuple:
+        if isinstance(chat, dict):
+            return chat.get("id"), chat.get("user_id")
+        return getattr(chat, "id", None), getattr(chat, "user_id", None)
+
+    async def _tito_mimi_goose_due(self, chat_id, user_id) -> bool:
+        if not isinstance(chat_id, str) or not chat_id or not isinstance(user_id, str) or not user_id:
+            return False
+        try:
+            chats_cls = globals().get("Chats")
+            if not globals().get("CHATS_AVAILABLE", False) or chats_cls is None:
+                return False
+            chats = chats_cls.get_chats()
+            if hasattr(chats, "__await__"):
+                chats = await chats
+            for chat in chats or []:
+                cid, owner = self._tito_chat_owner(chat)
+                if owner != user_id or cid == chat_id:
+                    continue
+                for msg in self._tito_chat_messages(chat):
+                    if self._tito_message_model(msg) == "mimi":
+                        return False
+            return True
+        except Exception as e:
+            self._tito_err("mimi_goose", e)
+            return False
+
+    def _tito_mimi_bear_due(self, chat_id) -> bool:
+        rate = int(getattr(self.valves, "MIMI_BEAR_RATE", 10) or 0)
+        if rate <= 0 or not isinstance(chat_id, str) or not chat_id:
+            return False
+        return int(hashlib.sha256(chat_id.encode("utf-8")).hexdigest(), 16) % rate == 0
+
+    async def _tito_mimi_inject(self, payload, metadata, user) -> str:
+        try:
+            messages = (payload or {}).get("messages") or []
+            users = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
+            if len(users) != 1:
+                return ""
+            chat_id = (metadata or {}).get("chat_id")
+            user_id = (user or {}).get("id")
+            goose_text = str(getattr(self.valves, "MIMI_GOOSE_INJECT", "") or "").strip()
+            bear_text = str(getattr(self.valves, "MIMI_BEAR_INJECT", "") or "").strip()
+            if goose_text and await self._tito_mimi_goose_due(chat_id, user_id):
+                kind, text = "goose", goose_text
+            elif bear_text and self._tito_mimi_bear_due(chat_id):
+                kind, text = "bear", bear_text
+            else:
+                kind, text = "none", ""
+            logger.info(f"{self._tito_tag()} inject=%s", kind)
+            return text
+        except Exception as e:
+            self._tito_err("mimi_inject", e)
+            return ""
+
+    def _tito_log_fingerprint(self, payload: dict, metadata) -> None:
+        tools_sha, system_sha = self._tito_fingerprint_shas(payload)
+        logger.info(f"{self._tito_tag()} %s", self._tito_fingerprint(payload))
+
+        chat_id = (metadata or {}).get("chat_id")
+        if not chat_id:
+            return
+        state = getattr(self, "_tito_fingerprint_state", None)
+        if state is None:
+            state = {}
+            self._tito_fingerprint_state = state
+        prev = state.get(chat_id)
+        if prev is not None and (prev[0] != tools_sha or prev[1] != system_sha):
+            logger.warning(
+                f"{self._tito_tag()} tools/system changed within chat_id=%s "
+                "(tools=%s system=%s)",
+                chat_id,
+                "changed" if prev[0] != tools_sha else "same",
+                "changed" if prev[1] != system_sha else "same",
+            )
+            self._tito_discord_alert(
+                f"{self._tito_label()}: tools/system fingerprint changed for chat_id={chat_id}"
+            )
+        state[chat_id] = (tools_sha, system_sha)
+
+    def _tito_vn_reminder_apply(self, payload: dict, extra_text: str = ""):
+        _tito_cv = getattr(self, "TITO_ACTIVE", None)
+        if _tito_cv is None or not _tito_cv.get():
+            return None
+        valve = self._tito_active_profile()["vn_reminder_valve"]
+        text = str(getattr(self.valves, valve, "") or "").strip()
+        extra = (extra_text or "").strip()
+        text = "\n\n".join(part for part in (text, extra) if part)
+        if not text:
+            return None
+        try:
+            messages = payload.get("messages") or []
+            target = None
+            for idx in range(len(messages) - 1, -1, -1):
+                msg = messages[idx]
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    target = idx
+                    break
+            if target is None:
+                return None
+            for later in messages[target + 1:]:
+                content = later.get("content") if isinstance(later, dict) else None
+                if isinstance(content, list) and any(
+                    isinstance(b, dict) and "cache_control" in b for b in content
+                ):
+                    logger.info(f"{self._tito_tag()} vn_reminder skipped: breakpoint after last user message")
+                    return None
+            msg = messages[target]
+            original = msg.get("content")
+            if isinstance(original, str):
+                content = [{"type": "text", "text": original}]
+                msg["content"] = content
+            elif isinstance(original, list):
+                content = original
+            else:
+                return None
+            block = {"type": "text", "text": text}
+            content.append(block)
+            logger.info(f"{self._tito_tag()} vn_reminder chars=%d", len(text))
+            return {"block": block, "original": original}
+        except Exception as exc:
+            self._tito_err("vn_reminder", exc)
+            return None
+
+    @staticmethod
+    def _tito_vn_reminder_remove(payload: dict, state) -> None:
+        if not state:
+            return
+        for msg in payload.get("messages") or []:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for i, block in enumerate(content):
+                if block is state["block"]:
+                    del content[i]
+                    if isinstance(state["original"], str):
+                        msg["content"] = state["original"]
+                    return
+
+    TITO_DECIDE_URL = "https://openrouter.ai/api/alpha/decisions"
+
+    TITO_DECIDE_MODEL = "~typesafe/jev-latest"
+    TITO_DECIDE_FALLBACK_MODEL = "microsoft/microsoft-decision-1"
+
+    TITO_DECIDE_IN_INSTRUCTIONS = "The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad in Fresno to a friendly chat companion. Judge the message as written."
+    TITO_DECIDE_OUT_INSTRUCTIONS = "The state is one reply, in Vietnamese, from a friendly chat companion to an elderly Vietnamese immigrant dad. Judge the reply as written."
+    TITO_DECIDE_FLAGS = {
+        "smart_consumer": {
+            "question": "Is the dad weighing a purchase, a sale, a price, a seller, a used item, or money paperwork (an official letter, a title, a bill), where a fair price range, the one or two things worth checking, or facts a seller might leave out would help him?",
+            "criteria": {"yes": "A buying, selling, price or money-paperwork situation",
+                         "no": "No purchase, price, seller or money paperwork involved"},
+        },
+        "needs_search": {
+            "question": "Does a good reply need anything LOCAL (Fresno, his bus, his job, nearby places or events), RECENT (prices, news, rules that change), or beyond common knowledge, so a quick web search would make it better?",
+            "criteria": {"yes": "A web search would improve the reply",
+                         "no": "The reply works fine from general knowledge or feelings alone"},
+        },
+        "casual_chat": {
+            "instructions": "The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad in Fresno to a friendly chat companion. Read it literally: if a very literal listener would answer it directly with a fact, it is a real question; if they would think 'why are you telling me this?', it invites open conversation. A remark about news he read, even with 'is it true?', is usually a morning-coffee chat, not a lookup.",
+            "question": "SCENARIO: An elderly Vietnamese immigrant in Fresno chats with a companion AI about daily life, family, memories, feelings, and news he has read. Given the scenario and the current message, is the user seeking casual, open-ended, or exploratory conversation?",
+            "criteria": {"yes": "Affirmative remark or open statement inviting talk, not a quiz a literal listener would answer.",
+                         "no": "Asks for a fact, definition, price, place, or time that a literal listener answers directly."},
+        },
+    }
+
+    TITO_DECIDE_OUT_FLAGS = {
+        "pure_vn": {
+            "question": "Is this reply written fully in natural everyday Vietnamese? English is fine only for names, brands, model names, short terms like title or smog, and URLs. Whole English sentences or English quotes make it NOT pure.",
+            "criteria": {"yes": "Fully natural Vietnamese apart from names, brands and short terms",
+                         "no": "Contains English sentences or quotes, or reads like a translation"},
+        },
+    }
+
+    TITO_DECIDE_REGEX = {
+        "smart_consumer": r"\b(giá|đô|bán|mua|title|tiền|thuế|IRS|marketplace)\b",
+        "needs_search": r"\b(bao nhiêu|ở đâu|mới|bây giờ|Fresno|tin)\b",
+    }
+
+    TITO_DECIDE_INJECT_MIN = {"smart_consumer": 0.5, "needs_search": 0.25}
+    TITO_DECIDE_INJECT_LINES = {
+        "smart_consumer": "anh is weighing a purchase. Tito is the friend who knows prices: a fair range first, the one or two things worth checking, and an English line anh can say to bargain, laid out so anh can scan it on his phone, in everyday words. The choice stays anh's.",
+        "needs_search": "anh's question touches something local, recent, or past what everyone already knows. Tito looks it up first, then talks like someone who just checked.",
+        "casual_chat":"anh is sharing about his day. A good friend hears the specific thing anh said and echoes it back warmly, sometimes with a gentle guess at how it felt (\"chắc anh cũng…\"), brings in what anh shared before, stays curious about one detail (a place, a smell, a meal, a person), and asks one easy question about it. Half-answers are fine. When anh brings up the old days, the friend walks there with him, then back to today.",
+    }
+    TITO_DECIDE_CASUAL_NO_LINE = "anh is asking about something he wants to know."
+
+    TITO_DECIDE_LOG_NAMES = (
+        ("smart_consumer", "sc"),
+        ("needs_search", "search"),
+        ("casual_chat", "casual"),
+    )
+
+    def _tito_decide_key(self) -> str:
+        try:
+            raw = getattr(self.valves, "TITO_DECIDE_KEY", "") or ""
+            key = decrypt_valve_secret(raw).strip()
+        except Exception:
+            key = ""
+        return key or os.environ.get("TITO_DECIDE_KEY", "").strip()
+
+    def _tito_decide_enabled(self) -> bool:
+        return (
+            self._tito_profile_flag("decide")
+            and bool(getattr(self.valves, "TITO_DECIDE", False))
+            and bool(self._tito_decide_key())
+        )
+
+    def _tito_decide_models(self) -> tuple:
+        main = (getattr(self.valves, "TITO_DECIDE_MODEL", "") or "").strip() or self.TITO_DECIDE_MODEL
+        fallback = (
+            (getattr(self.valves, "TITO_DECIDE_FALLBACK_MODEL", "") or "").strip()
+            or self.TITO_DECIDE_FALLBACK_MODEL
+        )
+        return main, fallback
+
+    @classmethod
+    def _tito_decide_post(cls, api_key: str, text: str, flag: str, timeout_s: float, model: str) -> float:
+        import json as _json
+        import urllib.request as _ur
+
+        spec = {**cls.TITO_DECIDE_FLAGS, **cls.TITO_DECIDE_OUT_FLAGS}
+        instructions = (
+            cls.TITO_DECIDE_OUT_INSTRUCTIONS if flag in cls.TITO_DECIDE_OUT_FLAGS
+            else cls.TITO_DECIDE_IN_INSTRUCTIONS
+        )
+        body = {
+            "model": model,
+            "state": text,
+            "questions": {flag: {"type": "choice", "instructions": instructions, **spec[flag]}},
+        }
+        req = _ur.Request(
+            cls.TITO_DECIDE_URL,
+            data=_json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+            },
+        )
+        with _ur.urlopen(req, timeout=timeout_s) as resp:
+            data = _json.loads(resp.read())
+        prob = float(data["answers"][flag]["probabilities"]["yes"])
+        if not 0.0 <= prob <= 1.0:
+            raise ValueError("probability out of range")
+        return prob
+
+    @classmethod
+    def _tito_decide_regex(cls, text: str, flag: str) -> float:
+        import re as _re
+        import unicodedata as _ud
+
+        norm = _ud.normalize("NFC", text or "")
+        return 1.0 if _re.search(cls.TITO_DECIDE_REGEX[flag], norm, _re.IGNORECASE) else 0.0
+
+    @classmethod
+    def _tito_decide_fallback(cls, text: str, flag: str) -> dict:
+        if flag == "casual_chat":
+            return {"p": 0.0, "src": "none"}
+        return {"p": cls._tito_decide_regex(text, flag), "src": "regex"}
+
+    async def _tito_decide_ask(self, key: str, text: str, flag: str, timeout_s: float):
+        import asyncio as _aio
+
+        try:
+            main, fallback = self._tito_decide_models()
+            t0 = time.monotonic()
+            for model, src in ((main, "jev"), (fallback, "msd")):
+                remaining = timeout_s - (time.monotonic() - t0)
+                if remaining <= 0:
+                    break
+                try:
+                    prob = await _aio.wait_for(
+                        _aio.to_thread(self._tito_decide_post, key, text, flag, remaining, model),
+                        remaining,
+                    )
+                    return {"p": prob, "src": src}
+                except Exception:
+
+                    continue
+            return None
+        except Exception:
+            return None
+
+    async def _tito_decide_shadow(self, text: str):
+        import asyncio as _aio
+
+        try:
+            timeout_s = max(0.1, int(getattr(self.valves, "TITO_DECIDE_TIMEOUT_MS", 1500) or 1500) / 1000)
+            key = self._tito_decide_key()
+            results: dict = {}
+
+            async def one(flag: str) -> None:
+                got = await self._tito_decide_ask(key, text, flag, timeout_s) if key else None
+                results[flag] = got or self._tito_decide_fallback(text, flag)
+
+            tasks = [_aio.ensure_future(one(flag)) for flag in self.TITO_DECIDE_FLAGS]
+            try:
+                await _aio.wait(tasks, timeout=timeout_s)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+            out = {}
+            for flag in self.TITO_DECIDE_FLAGS:
+                out[flag] = results.get(flag) or self._tito_decide_fallback(text, flag)
+            return out
+        except Exception as exc:
+            logger.info(f"{self._tito_tag()} decide failed err=%s", type(exc).__name__)
+            return None
+
+    @staticmethod
+    def _tito_decide_last_user_text(payload: dict) -> str:
+        messages = (payload or {}).get("messages") or []
+        for msg in reversed(messages):
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "\n".join(
+                    str(b.get("text", ""))
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            return ""
+        return ""
+
+    def _tito_decide_start(self, payload: dict):
+        import asyncio as _aio
+
+        try:
+            if not self._tito_decide_enabled():
+                return None
+            text = self._tito_decide_last_user_text(payload)
+            if not text.strip():
+                return None
+            return (_aio.ensure_future(self._tito_decide_shadow(text)), time.monotonic())
+        except Exception as exc:
+            logger.info(f"{self._tito_tag()} decide start failed err=%s", type(exc).__name__)
+            return None
+
+    async def _tito_decide_collect(self, state) -> None:
+        import asyncio as _aio
+
+        try:
+            task, t0 = state
+            timeout_s = max(0.1, int(getattr(self.valves, "TITO_DECIDE_TIMEOUT_MS", 1500) or 1500) / 1000)
+            try:
+                result = await _aio.wait_for(task, timeout_s)
+            except _aio.TimeoutError:
+                task.cancel()
+                ms = int((time.monotonic() - t0) * 1000)
+                logger.info(f"{self._tito_tag()} decide outcome=timeout ms=%d", ms)
+                return
+            ms = int((time.monotonic() - t0) * 1000)
+            self._tito_decide_log(result, ms)
+        except Exception as exc:
+            logger.info(f"{self._tito_tag()} decide collect failed err=%s", type(exc).__name__)
+
+    def _tito_decide_log(self, result, ms: int) -> None:
+        if not result:
+            logger.info(f"{self._tito_tag()} decide outcome=none ms=%d", ms)
+            return
+        parts = []
+        for flag, short in self.TITO_DECIDE_LOG_NAMES:
+            item = result.get(flag) or {}
+            parts.append(f"{short}={float(item.get('p', 0.0)):.2f}({item.get('src', 'regex')})")
+        logger.info(f"{self._tito_tag()} decide %s ms=%d", " ".join(parts), ms)
+
+    def _tito_decide_timeout_s(self) -> float:
+        return max(0.1, int(getattr(self.valves, "TITO_DECIDE_TIMEOUT_MS", 1500) or 1500) / 1000)
+
+    def _tito_decide_inject_on(self) -> bool:
+        return bool(getattr(self.valves, "TITO_DECIDE_INJECT", False)) and self._tito_decide_enabled()
+
+    async def _tito_decide_inject(self, state) -> str:
+        import asyncio as _aio
+
+        try:
+            task, t0 = state
+            try:
+                result = await _aio.wait_for(task, self._tito_decide_timeout_s())
+            except _aio.TimeoutError:
+                task.cancel()
+                logger.info(f"{self._tito_tag()} decide_inject outcome=timeout")
+                return ""
+            self._tito_decide_log(result, int((time.monotonic() - t0) * 1000))
+            if not result:
+                return ""
+            lines, names = [], []
+            for flag in self.TITO_DECIDE_FLAGS:
+                item = result.get(flag) or {}
+                if item.get("src") not in ("jev", "msd"):
+                    continue
+                prob = float(item.get("p", 0.0))
+                if flag == "casual_chat":
+                    line = (self.TITO_DECIDE_INJECT_LINES[flag] if prob >= 0.5
+                            else self.TITO_DECIDE_CASUAL_NO_LINE)
+                elif prob >= self.TITO_DECIDE_INJECT_MIN[flag]:
+                    line = self.TITO_DECIDE_INJECT_LINES[flag]
+                else:
+                    continue
+                lines.append(line)
+                names.append(flag)
+            logger.info(f"{self._tito_tag()} decide_inject flags=%s", ",".join(names) or "none")
+            return "\n\n".join(lines)
+        except Exception as exc:
+            logger.info(f"{self._tito_tag()} decide_inject failed err=%s", type(exc).__name__)
+            return ""
+
+    def _tito_decide_out_start(self, request_ctx, metadata):
+        import asyncio as _aio
+
+        try:
+            if not self._tito_decide_enabled() or not self._is_tito(metadata):
+                return None
+            visible = visible_text(split_visible(request_ctx.text() or ""))
+            if not visible.strip():
+                return None
+            return (_aio.ensure_future(self._tito_decide_out_call(visible)), time.monotonic())
+        except Exception as exc:
+            logger.info(f"{self._tito_tag()} decide_out start failed err=%s", type(exc).__name__)
+            return None
+
+    async def _tito_decide_out_call(self, text: str):
+        try:
+            key = self._tito_decide_key()
+            if not key:
+                return None
+            return await self._tito_decide_ask(key, text, "pure_vn", self._tito_decide_timeout_s())
+        except Exception:
+            return None
+
+    async def _tito_decide_out_collect(self, state, guard_trigger: str) -> None:
+        import asyncio as _aio
+
+        try:
+            task, t0 = state
+            remaining = max(0.001, self._tito_decide_timeout_s() - (time.monotonic() - t0))
+            got = None
+            try:
+                got = await _aio.wait_for(task, remaining)
+            except _aio.TimeoutError:
+                task.cancel()
+            except Exception:
+                got = None
+            ms = int((time.monotonic() - t0) * 1000)
+            if got:
+                part = f"pure_vn={float(got['p']):.2f}({got['src']})"
+            else:
+                part = "pure_vn=-(none)"
+            logger.info(f"{self._tito_tag()} decide_out %s guard_trigger=%s ms=%d", part, guard_trigger, ms)
+        except Exception as exc:
+            logger.info(f"{self._tito_tag()} decide_out collect failed err=%s", type(exc).__name__)
+
+    def _tito_shrink_images(self, payload: dict) -> dict:
+        max_px = int(getattr(self.valves, "TITO_IMAGE_MAX_PX", 0) or 0)
+        if max_px <= 0:
+            return payload
+        try:
+            import base64
+            import io
+
+            from PIL import Image
+        except Exception as exc:
+            self._tito_err("image_shrink", exc)
+            return payload
+
+        def shrink(block: dict) -> dict:
+            source = block.get("source")
+            if not isinstance(source, dict) or source.get("type") != "base64":
+                return block
+            data = source.get("data")
+            if not isinstance(data, str):
+                return block
+            try:
+                with Image.open(io.BytesIO(base64.b64decode(data))) as im:
+                    width, height = im.size
+                    if max(width, height) <= max_px:
+                        return block
+                    im.load()
+                    has_alpha = im.mode in ("RGBA", "LA") or (
+                        im.mode == "P" and "transparency" in im.info
+                    )
+                    scale = max_px / max(width, height)
+                    resized = im.resize(
+                        (max(1, round(width * scale)), max(1, round(height * scale))),
+                        Image.LANCZOS,
+                    )
+                out = io.BytesIO()
+                if has_alpha:
+                    resized.save(out, format="PNG", optimize=True)
+                    media_type = "image/png"
+                else:
+                    if resized.mode not in ("RGB", "L"):
+                        resized = resized.convert("RGB")
+                    resized.save(out, format="JPEG", quality=85)
+                    media_type = "image/jpeg"
+                new_source = {
+                    **source,
+                    "media_type": media_type,
+                    "data": base64.b64encode(out.getvalue()).decode("ascii"),
+                }
+                return {**block, "source": new_source}
+            except Exception as exc:
+                self._tito_err("image_shrink", exc)
+                return block
+
+        def walk(blocks: list) -> list:
+            result = []
+            for block in blocks:
+                if isinstance(block, dict):
+                    if block.get("type") == "image":
+                        block = shrink(block)
+                    elif isinstance(block.get("content"), list):
+                        block = {**block, "content": walk(block["content"])}
+                result.append(block)
+            return result
+
+        messages = []
+        for message in payload.get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), list):
+                message = {**message, "content": walk(message["content"])}
+            messages.append(message)
+        return {**payload, "messages": messages}
+
+    @staticmethod
+    def _tito_count_images(request_ctx, payload: dict) -> None:
+        count = 0
+        total = 0
+
+        def walk(blocks) -> None:
+            nonlocal count, total
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image":
+                    count += 1
+                    source = block.get("source") or {}
+                    data = source.get("data") if isinstance(source, dict) else None
+                    if isinstance(data, str):
+                        pad = len(data) - len(data.rstrip("="))
+                        total += len(data) * 3 // 4 - pad
+                elif isinstance(block.get("content"), list):
+                    walk(block["content"])
+
+        for message in (payload or {}).get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), list):
+                walk(message["content"])
+        request_ctx.timing["images"] = count
+        request_ctx.timing["image_bytes"] = total
+
+    def _tito_log_timing(self, request_ctx, usage: dict) -> None:
+        timing = request_ctx.timing
+        t0 = timing.get("t0")
+        if t0 is None:
+            return
+        now = time.monotonic()
+
+        def ms(key: str, end: float | None = None) -> int:
+            value = timing.get(key)
+            return 0 if value is None else round(((end if end is not None else value) - t0) * 1000)
+
+        logger.info(
+            f"{self._tito_tag()} timing ttfb_ms=%d first_text_ms=%d stream_ms=%d guard_ms=%d total_ms=%d "
+            "in=%d out=%d cache_read=%d cache_write=%d images=%d image_bytes=%d",
+            ms("ttfb"),
+            ms("first_text"),
+            round(timing.get("stream", 0.0) * 1000),
+            round(timing.get("guard", 0.0) * 1000),
+            ms("t0", now),
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            timing.get("images", 0),
+            timing.get("image_bytes", 0),
+        )
+
+    @staticmethod
+    def _tito_usage_stream(text: str, model: str, usage: dict):
+
+        async def _chunks():
+            if text:
+                yield {
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                }
+            yield {"object": "chat.completion.chunk", "model": model, "choices": [], "usage": usage}
+
+        return _chunks()
 
     async def _create_payload(
         self,

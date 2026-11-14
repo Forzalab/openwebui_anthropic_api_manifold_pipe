@@ -733,6 +733,18 @@ class PipeStreamSupportMethods:
             # the block is never replayed.
             return ""
 
+        # Profile hide_thinking (mimi): no visible reasoning at all. While
+        # streaming emit nothing; when done, emit the block in the invisible
+        # carrier so the next turn can replay it byte-exact.
+        _prof_cv = getattr(self, "TITO_PROFILE", None)
+        _prof = _prof_cv.get() if _prof_cv is not None else None
+        if isinstance(_prof, dict) and _prof.get("hide_thinking"):
+            if duration is None or not signature:
+                return ""
+            return self._format_hidden_block(
+                [{"type": "thinking", "thinking": content, "signature": signature}]
+            )
+
         # Escape content and add > prefix per line (OpenWebUI quota block style)
         escaped_lines = "\n".join(
             f"> {html.escape(line)}" if not line.startswith(">") else html.escape(line)

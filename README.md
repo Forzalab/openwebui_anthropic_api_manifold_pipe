@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.10.2`
+- **Current pipe version:** `0.12.6`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
@@ -236,6 +236,33 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.12.6`
+- mimi: thinking hidden (invisible carrier, still replayed); no `<details>` reaches Conduit. Tito unchanged
+
+### `v0.12.5`
+- mimi thinking back on; deploy with the open-webui build that puts mimi on the Tito path
+
+### `v0.12.4`
+- Profile key `thinking`: mimi runs without extended thinking (no reasoning block for Conduit to show raw). Tito unchanged
+
+### `v0.12.3`
+- Tito output guard: paragraphs, lines and list items stay at 1 to 3 sentences (`MAX_SENTENCES` 3, unchanged) and now also get word caps, each sentence at most 25 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 45 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
+
+### `v0.12.2`
+- System split (N1) also matches each profile's memory heading (mimi: "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN"). Tito unchanged
+
+### `v0.12.1`
+- Mimi one-turn injections, first user turn of a chat only, in the same slot as the VN reminder and never logged. Goose once per person (no earlier mimi chat; valve `MIMI_GOOSE_INJECT`), otherwise bear news for 1 in `MIMI_BEAR_RATE` chats (valve `MIMI_BEAR_INJECT`, default rate 10, 0 = off). Tito and other models unchanged
+
+### `v0.12.0`
+- Tito stack is per model: a profile table (`TITO_PROFILES`) keyed by OWUI model id. `tito` keeps today's values exactly. New model `mimi` (the Mimi companion) runs the same stack with its own budget caps (`MIMI_HARD_CAP_USD` 10 / `MIMI_SOFT_CAP_USD` 6), spend sum over its own messages only, its own reminder valve (`MIMI_VN_REMINDER`, default off), its own tools file (`MIMI_TOOLS_FILE`, falls back to `TITO_TOOLS_FILE`), its own Vietnamese texts, and no output guard and no TITO_DECIDE checks. Discord alerts use the profile label.
+
+### `v0.11.0`
+- Tito model (OWUI model id `tito`): fixed config (effort `medium`, adaptive thinking, Opus-5-5 advisor, `web_search` Fresno/10 uses, tool search off), a frozen tools array loaded from `TITO_TOOLS_FILE`, a Pacific-month budget gate (`TITO_HARD_CAP_USD` 22 / `TITO_SOFT_CAP_USD` 15, fail-open) and Vietnamese-only error mapping. Gated entirely on `__metadata__["model"]["id"] == "tito"`; every other model is byte-for-byte unchanged
+- Tito logs one `[TITO] timing ...` INFO line per turn (time to first byte, first text, stream, output guard, total; token counts; image count and bytes). Numbers only, no content
+- Valve `TITO_IMAGE_MAX_PX` (default `0` = off): when set, Tito downscales base64 images whose longest side is larger (LANCZOS, JPEG q85 unless transparent). Sent unchanged if Pillow is missing or an image fails
+
+
 ### `v0.10.2`
 - Logs carry no chat content or personal data at any level, DEBUG included. The `[PAYLOAD]` line replaces every string in `messages`, `system` and `metadata` with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and `cache_control` stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters
 - Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump

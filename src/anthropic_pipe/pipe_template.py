@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.2
+version: 0.12.6
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,56 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.6
+- Profile key `hide_thinking` (mimi): thinking stays on but is never shown; the finished block rides the invisible `[anthropic-hidden]` carrier and replays next turn. Tito unchanged.
+
+v0.12.5
+- mimi thinking back on (profile `thinking` True). Deploy only together with the open-webui build where `is_tito_model` covers mimi, which renders the reasoning block folded.
+
+v0.12.4
+- Profile key `thinking`: tito keeps extended thinking (unchanged); mimi runs with thinking off, so no reasoning `<details>` carrier reaches clients (Conduit showed it raw).
+
+v0.12.3
+- Tito output guard: paragraphs, lines and list items stay at 1 to 3 sentences (`MAX_SENTENCES` 3, unchanged) and now also get word caps, each sentence at most 25 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 45 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
+
+v0.12.2
+- System split (N1) also matches each profile's memory heading (`snapshot_heading`; mimi = "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN", must match OWUI). Tito heading tried first, unchanged.
+
+v0.12.1
+- Mimi one-turn injections (first user turn of a chat only, same slot as the VN reminder, never logged): goose once per person (no earlier mimi chat; valve `MIMI_GOOSE_INJECT`), otherwise bear news for 1 in `MIMI_BEAR_RATE` chats (valve `MIMI_BEAR_INJECT`, default rate 10, 0 = off). Tito and other models unchanged.
+
+v0.12.0
+- Tito stack is per model: a profile table (`TITO_PROFILES`) keyed by OWUI model id. `tito` keeps today's values exactly. New model `mimi` (the Mimi companion) runs the same stack with its own budget caps (`MIMI_HARD_CAP_USD` 10 / `MIMI_SOFT_CAP_USD` 6), spend sum over its own messages only, its own reminder valve (`MIMI_VN_REMINDER`, default off), its own tools file (`MIMI_TOOLS_FILE`, falls back to `TITO_TOOLS_FILE`), its own Vietnamese texts, and no output guard and no TITO_DECIDE checks. Discord alerts use the profile label.
+
+v0.11.9
+- Tito decide: when the `TITO_DECIDE_KEY` valve is empty, the key is read from env `TITO_DECIDE_KEY` (e.g. a compose `.env`). Valve still wins.
+
+v0.11.8
+- Tito decide: casual_chat question rewritten (scenario + literal-listener reading in its own instructions); held-out AUC .99 Jev / .86 MSD on 12 labeled messages.
+
+v0.11.7
+- Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
+v0.11.6
+- Tito decide shadow: new input flag `casual_chat` (casual chat about his day or feelings vs. a request for information, advice or a decision; prompt has chat and ask examples; no regex fallback, MSD failure gives no score). New output check `pure_vn` on the visible reply (fully natural Vietnamese, English only for names, brands, short terms and URLs), started with the output guard and logged as one `[TITO] decide_out` line with the guard trigger. Valve `TITO_DECIDE_INJECT` (default off): when on, the input flags are awaited before the main call and the lines of MSD-scored flags above threshold are added as one block in the VN reminder slot. Log only otherwise; fails open.
+
+v0.11.5
+- Tito output guard: Vietnamese-only rule (rule 10: English kept only for names, brands, short terms, URLs and one short English line with its Vietnamese meaning), new trigger `english_sentence` (5+ consecutive English words with 2+ English function words, outside URLs, code, links and quotes of 12 words or fewer; common unaccented Vietnamese words break a run), list items judged one by one (over 3 sentences = long_paragraph), and multiple_questions ignores a short quoted English line.
+
+v0.11.4
+- Tito decide shadow (valve `TITO_DECIDE`, default off): per Tito turn, three flags (smart_consumer, needs_search, and a story flag) are scored with OpenRouter MSD-1 in parallel, started before the main stream and awaited after it. One `[TITO] decide` line is logged; the reply is never changed or delayed. Any error or timeout falls back to a Vietnamese keyword regex per flag. The key (`TITO_DECIDE_KEY`, encrypted at rest) and message text are never logged.
+
+v0.11.3
+- Tito per-turn VN reminder (valve `TITO_VN_REMINDER`, default empty = off): one extra text block appended to the last user message of the first request of each turn, after the prompt-cache breakpoints. It carries no cache_control, is removed before the next tool-loop iteration, and is never logged (only its length).
+
+v0.11.2
+- Tito output guard sends `thinking: {"type": "disabled"}` explicitly, since Haiku 5.5 thinks by default and that added latency and parse failures (thinking ate max_tokens).
+
+v0.11.1
+- Tito output guard (valve `TITO_OUTPUT_GUARD`, default on): after a Tito reply finishes, a cheap local pre-check looks for rule breaks (no final question, more than one question, "tôi", long dashes, tool/AI/sleep wording, a paragraph over three sentences). Only then is `claude-haiku-5-5` asked for the smallest fix. An edit that loses a number, URL or digit-bearing token is rejected. On an accepted edit the message is replaced once, keeping every `<details>` block, `[anthropic-hidden-...]` carrier and metadata marker byte-for-byte. Any error leaves the streamed reply untouched; non-Tito models never reach it.
+
+v0.11.0
+- Tito model (OWUI model id `tito`): fixed config (effort medium, adaptive thinking, Opus-5-5 advisor, web_search Fresno/10 uses, tool search off), a frozen tools array loaded from `TITO_TOOLS_FILE`, a Pacific-month budget gate (`TITO_HARD_CAP_USD` 22 / `TITO_SOFT_CAP_USD` 15, fail-open) and Vietnamese-only error mapping. Gated entirely on `__metadata__["model"]["id"] == "tito"`; every other model is byte-for-byte unchanged.
+
 v0.10.2
 - Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
 - Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
@@ -637,6 +687,8 @@ class PipeRequestContext:
     # so interleaved runs — retries, concurrent turns, two runs writing into the
     # same OpenWebUI message — can be told apart in the container log.
     run_id: str = field(default_factory=lambda: os.urandom(4).hex())
+    # Tito timing marks (monotonic seconds), read once by _tito_log_timing.
+    timing: dict = field(default_factory=dict)
 
     # Populated by pipe() after auth/tool setup; handlers read them via ctx.
     # `status` is a StatusEmitter, typed loosely because its class is compiled
@@ -655,6 +707,8 @@ class PipeRequestContext:
 
     async def emit_delta(self, content: str) -> None:
         """Emit a streaming content delta and append it to the accumulated message."""
+        if content and "first_text" not in self.timing:
+            self.timing["first_text"] = time.monotonic()
         await self.emit_event({"type": "message", "data": {"content": content}})
         self.final_message.append(content)
 
@@ -746,6 +800,9 @@ class PipeRequestContext:
 
 # BEGIN GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 # END GENERATED SECTION: anthropic_pipe.response.internal_tool_results
+
+# BEGIN GENERATED SECTION: anthropic_pipe.response.tito_guard
+# END GENERATED SECTION: anthropic_pipe.response.tito_guard
 
 # BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
 # END GENERATED SECTION: anthropic_pipe.shared.pricing
@@ -1005,6 +1062,81 @@ class Pipe:
             default="",
             description="AWS 'Claude on AWS' workspace id. When set, sent as the 'anthropic-workspace-id' "
             "header on every request. Required when ANTHROPIC_BASE_URL points at an aws-external-anthropic endpoint.",
+        )
+        TITO_QUIET_UI: bool = Field(
+            default=True,
+            description="Hide status lines, sources and info notifications when the request model is Tito "
+            "(tito.TITO_MODEL_ID). Errors still show.",
+        )
+        TITO_OUTPUT_GUARD: bool = Field(
+            default=True,
+            description="After a Tito reply finishes, one Haiku check looks for rule breaks in the visible text "
+            "(one final question, no 'tôi', no long dashes, short paragraphs, no tool/AI talk) and replaces the "
+            "message once with a minimal fix. Hidden blocks and metadata markers are kept byte-for-byte. "
+            "Errors never affect the reply.",
+        )
+        TITO_IMAGE_MAX_PX: int = Field(
+            default=0,
+            ge=0,
+            description="Tito only. When > 0, base64 images in the outgoing request whose longest side is larger "
+            "are resized to this many pixels (aspect kept, LANCZOS). JPEG q85 unless the image has transparency. "
+            "0 = off. A failing image is sent unchanged and logged as one WARNING without content.",
+        )
+        TITO_VN_REMINDER: str = Field(
+            default="",
+            description="Tito only. Text appended as one extra block to the last user message of the first "
+            "request of each turn, after the prompt-cache breakpoints, so the cached prefix never changes. "
+            "Empty = off. Not logged.",
+        )
+        MIMI_VN_REMINDER: str = Field(
+            default="",
+            description="Mimi only. Same as TITO_VN_REMINDER, for the mimi model. Empty = off. Not logged.",
+        )
+        MIMI_GOOSE_INJECT: str = Field(
+            default="First meeting with bạn. After the answer, Mimi mentions her new friend once, warmly and briefly: a white goose, soft and squishy, whose neck flops when hugged.",
+            description="Mimi only. One-turn text on the first user turn of a chat, for a user with no earlier "
+            "mimi chat (goose once per person). Empty = off. Not logged.",
+        )
+        MIMI_BEAR_INJECT: str = Field(
+            default="If the mood is light and there is room, Mimi adds one short line of news from the bear forest, her neighbors in the Đà Lạt pines. In health, money or sad moments, the answer and bạn come first and the forest stays quiet.",
+            description="Mimi only. One-turn text on the first user turn of a chat picked by MIMI_BEAR_RATE, when "
+            "no goose fired. Empty = off. Not logged.",
+        )
+        MIMI_BEAR_RATE: int = Field(
+            default=10,
+            ge=0,
+            description="Mimi only. About 1 in N chats gets the bear injection (deterministic per chat id). "
+            "0 = off.",
+        )
+        TITO_DECIDE: bool = Field(
+            default=False,
+            description="Tito only. Shadow mode: per turn, score the input flags and the pure_vn output "
+            "check with OpenRouter MSD-1 and log [TITO] decide lines. No effect on the reply. Off = no call.",
+        )
+        TITO_DECIDE_MODEL: str = Field(
+            default="~typesafe/jev-latest",
+            description="Tito only. Main model id for the TITO_DECIDE calls (OpenRouter decisions endpoint).",
+        )
+        TITO_DECIDE_FALLBACK_MODEL: str = Field(
+            default="microsoft/microsoft-decision-1",
+            description="Tito only. Fallback model id for TITO_DECIDE, asked only when the main model call fails.",
+        )
+        TITO_DECIDE_KEY: EncryptedStr = Field(
+            default="",
+            description="Tito only. OpenRouter API key for TITO_DECIDE. Stored encrypted when "
+            "WEBUI_SECRET_KEY is set. Never logged.",
+        )
+        TITO_DECIDE_TIMEOUT_MS: int = Field(
+            default=1500,
+            ge=100,
+            description="Tito only. Timeout in milliseconds for the TITO_DECIDE calls, overall and per flag. "
+            "A timeout falls back to the regex for that flag.",
+        )
+        TITO_DECIDE_INJECT: bool = Field(
+            default=False,
+            description="Tito only. Needs TITO_DECIDE. Awaits the input flags before the main call (up to "
+            "TITO_DECIDE_TIMEOUT_MS) and adds one line per flag that passes its threshold to the per-turn "
+            "block, after the cache breakpoints. Timeout or regex fallback adds nothing. Off = log only.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -1315,7 +1447,7 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
+        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1", "claude-sonnet-5-5"] = Field(
             default="claude-opus-5",
             description="Advisor model ID.",
         )

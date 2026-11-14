@@ -26,6 +26,16 @@ async def create_request_payload(
 
     status = StatusEmitter(__event_emitter__)
 
+    # Tito (SPEC D1/D3): gated on the OWUI model id in metadata, never on the
+    # (already-rewritten) body model. Keys covered by TITO_CONFIG override the
+    # matching valves; everything else falls through untouched.
+    _is_tito_fn = getattr(pipe, "_is_tito", None)
+    is_tito = bool(_is_tito_fn is not None and _is_tito_fn(__metadata__))
+    _tito_cfg = {}
+    if is_tito:
+        _tito_cfg_fn = getattr(pipe, "_tito_config", None)
+        _tito_cfg = _tito_cfg_fn() if callable(_tito_cfg_fn) else (_tito_cfg_fn or {})
+
     ## General payload creation
     actual_model_name = body["model"].split("/")[-1]
     model_info = pipe.get_model_info(actual_model_name)
@@ -76,7 +86,10 @@ async def create_request_payload(
             return value
 
         body_effort = body.get("reasoning_effort")
-        if body_effort in ("low", "medium", "high", "xhigh", "max"):
+        if is_tito:
+            # Tito: reasoning_effort is ignored; effort is pinned to TITO_CONFIG.
+            effective_effort = str(_tito_cfg.get("effort") or "medium")
+        elif body_effort in ("low", "medium", "high", "xhigh", "max"):
             effective_effort = _clamp_effort(body_effort)
         else:
             effective_effort = _clamp_effort(__user__["valves"].EFFORT)
@@ -85,8 +98,15 @@ async def create_request_payload(
         logger.debug(f"Effort level set to: {effective_effort}")
 
     # Handle Thinking
-    enable_thinking = __user__["valves"].ENABLE_THINKING or __metadata__.get(
-        "anthropic_thinking", False
+    _tito_profile_fn = getattr(pipe, "_tito_profile", None)
+    _tito_prof = (_tito_profile_fn(__metadata__) if (is_tito and callable(_tito_profile_fn)) else None) or {}
+    enable_thinking = (
+        bool(_tito_prof.get("thinking", True))
+        if is_tito
+        else (
+            __user__["valves"].ENABLE_THINKING
+            or __metadata__.get("anthropic_thinking", False)
+        )
     )
     if not enable_thinking and model_info.get("thinking_always_on"):
         # Opus 5.5 400s on thinking:{"type":"disabled"}; effort is the only
@@ -100,8 +120,11 @@ async def create_request_payload(
             effort_config = {"effort": "low"}
         enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
+        # Tito: thinking is pinned to adaptive (no display key, no budget_tokens).
+        if is_tito:
+            thinking_config = dict(_tito_cfg.get("thinking") or {"type": "adaptive"})
         # Opus 4.6 (supports adaptive thinking) uses effort as the control
-        if model_info["supports_adaptive_thinking"]:
+        elif model_info["supports_adaptive_thinking"]:
             thinking_config = {"type": "adaptive"}
         else:
             user_budget = __user__["valves"].THINKING_BUDGET_TOKENS
@@ -130,7 +153,7 @@ async def create_request_payload(
             )
 
         thinking_display = __user__["valves"].THINKING_DISPLAY
-        if thinking_display in ("omitted", "summarized", "updates"):
+        if not is_tito and thinking_display in ("omitted", "summarized", "updates"):
             thinking_config["display"] = thinking_display
 
         # Replayed thinking blocks are bound to the request prefix (system,
@@ -462,8 +485,21 @@ async def create_request_payload(
         logger.info(f"📦 Reusing container from previous turn: {previous_container_id}")
 
     # Add advisor tool beta
-    if __user__["valves"].ENABLE_ADVISOR_TOOL:
+    if is_tito or __user__["valves"].ENABLE_ADVISOR_TOOL:
         beta_headers.append("advisor-tool-2026-03-01")
+
+    # PATCH D: a mid-conversation system message is present -> its beta header.
+    if is_tito and any(
+        isinstance(_m, dict)
+        and _m.get("role") == "system"
+        and (
+            _m.get("clear_at") == "next_user_message"
+            or _m.get("mid_conversation") is True
+        )
+        for _m in processed_messages
+    ):
+        if "mid-conversation-system-clear-at-2026-08-21" not in beta_headers:
+            beta_headers.append("mid-conversation-system-clear-at-2026-08-21")
 
     # OpenWebUI's own Context Compaction (admin setting, runs before any filter
     # or pipe) has already summarized this chat when its marker sits in the
@@ -711,7 +747,7 @@ async def create_request_payload(
         _t["name"] for _t in tools_list
         if isinstance(_t, dict) and _t.get("defer_loading") and _t.get("name")
     )
-    if _deferred_names:
+    if _deferred_names and not is_tito:
         _tool_search_nudge = {
             "type": "text",
             "text": (
@@ -734,7 +770,11 @@ async def create_request_payload(
     # "run X in the terminal", the model used the sandbox (bash_code_execution),
     # which cannot see the user's machine. Static text, only in that combination.
     _tool_names = {_t.get("name") for _t in tools_list if isinstance(_t, dict)}
-    if (__metadata__ or {}).get("terminal_id") and "code_execution" in _tool_names:
+    if (
+        (__metadata__ or {}).get("terminal_id")
+        and "code_execution" in _tool_names
+        and not is_tito
+    ):
         _terminal_hint = {
             "type": "text",
             "text": (
@@ -750,6 +790,10 @@ async def create_request_payload(
         system_messages = system_messages + [_terminal_hint]
 
     # Processing Messages and Caching
+    if is_tito and system_messages:
+        _split = getattr(pipe, "_tito_split_system", None)
+        if callable(_split):
+            system_messages = _split(system_messages)
     if system_messages and len(system_messages) > 0:
         payload["system"] = system_messages
 

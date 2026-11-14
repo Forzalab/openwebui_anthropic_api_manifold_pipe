@@ -47,6 +47,7 @@ STREAM_SOURCES = [
     ("response.code_execution_results", SRC_DIR / "response" / "code_execution_results.py"),
     ("response.web_tool_results", SRC_DIR / "response" / "web_tool_results.py"),
     ("response.internal_tool_results", SRC_DIR / "response" / "internal_tool_results.py"),
+    ("response.tito_guard", SRC_DIR / "response" / "tito_guard.py"),
     ("shared.pricing", SRC_DIR / "shared" / "pricing.py"),
 ]
 
@@ -74,6 +75,7 @@ METHOD_GROUP_SOURCES = [
     SRC_DIR / "shared" / "tasks.py",
     SRC_DIR / "response" / "runtime.py",
     SRC_DIR / "pipe_orchestrator.py",
+    SRC_DIR / "tito.py",
 ]
 
 BEGIN_PAYLOAD, END_PAYLOAD = _markers("request_payload")
