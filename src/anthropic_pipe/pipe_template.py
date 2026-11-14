@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.9
+version: 0.12.0
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.0
+- Tito stack is per model: a profile table (`TITO_PROFILES`) keyed by OWUI model id. `tito` keeps today's values exactly. New model `mimi` (the Mimi companion) runs the same stack with its own budget caps (`MIMI_HARD_CAP_USD` 10 / `MIMI_SOFT_CAP_USD` 6), spend sum over its own messages only, its own reminder valve (`MIMI_VN_REMINDER`, default off), its own tools file (`MIMI_TOOLS_FILE`, falls back to `TITO_TOOLS_FILE`), its own Vietnamese texts, and no output guard and no TITO_DECIDE checks. Discord alerts use the profile label.
+
 v0.11.9
 - Tito decide: when the `TITO_DECIDE_KEY` valve is empty, the key is read from env `TITO_DECIDE_KEY` (e.g. a compose `.env`). Valve still wins.
 
@@ -1066,6 +1069,10 @@ class Pipe:
             description="Tito only. Text appended as one extra block to the last user message of the first "
             "request of each turn, after the prompt-cache breakpoints, so the cached prefix never changes. "
             "Empty = off. Not logged.",
+        )
+        MIMI_VN_REMINDER: str = Field(
+            default="",
+            description="Mimi only. Same as TITO_VN_REMINDER, for the mimi model. Empty = off. Not logged.",
         )
         TITO_DECIDE: bool = Field(
             default=False,
