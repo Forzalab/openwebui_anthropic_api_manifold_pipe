@@ -237,7 +237,7 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 
 ## 📝 Recent pipe changes
 ### `v0.12.3`
-- Tito output guard: paragraphs, lines and list items are held to 1 to 2 short sentences (`MAX_SENTENCES` 2, was 3), each sentence at most 20 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 30 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
+- Tito output guard: paragraphs, lines and list items are held to 1 to 2 short sentences (`MAX_SENTENCES` 2, was 3), each sentence at most 25 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 45 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
 
 ### `v0.12.2`
 - System split (N1) also matches each profile's memory heading (mimi: "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN"). Tito unchanged

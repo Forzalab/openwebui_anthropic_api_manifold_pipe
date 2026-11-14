@@ -23,8 +23,8 @@ TITO_GUARD_MODEL = "claude-haiku-5-5"
 # Readability limits for the elderly reader. The rule text and the local
 # pre-check read these same numbers, so they cannot drift apart.
 MAX_SENTENCES = 2  # per paragraph, line or list item
-MAX_SENTENCE_WORDS = 20  # whitespace tokens in one sentence
-MAX_UNIT_WORDS = 30  # whitespace tokens in one paragraph, line or list item
+MAX_SENTENCE_WORDS = 25  # whitespace tokens in one sentence
+MAX_UNIT_WORDS = 45  # whitespace tokens in one paragraph, line or list item
 
 _TITO_GUARD_RULES_TEMPLATE = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
 
