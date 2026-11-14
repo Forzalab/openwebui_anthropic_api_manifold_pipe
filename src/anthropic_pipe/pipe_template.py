@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.4
+version: 0.12.5
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.5
+- mimi thinking back on (profile `thinking` True). Deploy only together with the open-webui build where `is_tito_model` covers mimi, which renders the reasoning block folded.
+
 v0.12.4
 - Profile key `thinking`: tito keeps extended thinking (unchanged); mimi runs with thinking off, so no reasoning `<details>` carrier reaches clients (Conduit showed it raw).
 

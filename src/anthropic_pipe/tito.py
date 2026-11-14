@@ -105,9 +105,10 @@ class PipeTitoMethods:
             "guard": False,
             "decide": False,
             "injects": True,
-            # No thinking: Conduit shows the reasoning <details> carrier raw for
-            # non-Tito OWUI models, and translation does not need it.
-            "thinking": False,
+            # Thinking on (Tony picked A): the OWUI Tito path (open-webui
+            # is_tito_model incl. mimi) renders the reasoning block folded, like
+            # Tito. Set False again if mimi runs on an OWUI without that path.
+            "thinking": True,
             "vn_reminder_valve": "MIMI_VN_REMINDER",
             "hard_cap_env": "MIMI_HARD_CAP_USD",
             "hard_cap_default": 10.0,
