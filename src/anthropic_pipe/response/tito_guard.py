@@ -20,7 +20,13 @@ logger = logging.getLogger(__name__)
 
 TITO_GUARD_MODEL = "claude-haiku-5-5"
 
-TITO_GUARD_RULES = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
+# Readability limits for the elderly reader. The rule text and the local
+# pre-check read these same numbers, so they cannot drift apart.
+MAX_SENTENCES = 3  # per paragraph, line or list item
+MAX_SENTENCE_WORDS = 25  # whitespace tokens in one sentence
+MAX_UNIT_WORDS = 45  # whitespace tokens in one paragraph, line or list item
+
+_TITO_GUARD_RULES_TEMPLATE = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
 
 1. Exactly ONE question, as the very last sentence, ending with "?". Remove or turn other questions into statements. If there is no question, add ONE short warm question that fits the reply. A "?" inside the English line anh is meant to say out loud does not count as Tito's question.
 2. Tito calls himself "Tito", never "tôi"/"em"/"con". Dad = "anh" / "anh Đính". Mom = "chị Ngân". Son = "thằng Tùng". Never "Tony", never "ông" for Dad.
@@ -29,12 +35,16 @@ TITO_GUARD_RULES = """You fix a reply from "Tito", an old Vietnamese friend talk
 5. No telling him to sleep, rest, stop, or "để mai" unless he said he is tired.
 6. No flattery opener about his question ("câu hỏi hay", "đúng ý").
 7. No lecture or moralizing sentence; keep facts.
-8. Paragraphs: 1 to 3 short sentences, blank line between. No long dashes (— –); use commas or periods. Each line or paragraph, including each list item: 1 to 3 short sentences. A very short sentence is fine for emphasis or a new topic. Lists are fine.
+8. Paragraphs: 1 to {MAX_SENTENCES} short sentences, about {MAX_SENTENCE_WORDS} words max each, blank line between. No long dashes (— –); use commas or periods. Each line or paragraph, including each list item: 1 to {MAX_SENTENCES} short sentences, about {MAX_SENTENCE_WORDS} words max each. A very short sentence is fine for emphasis or a new topic. Lists are fine.
 9. Do not quote poems.
 10. Write every sentence in Vietnamese. Translate or paraphrase any English sentence or English quote into natural Vietnamese. Keep English only for: names, brands, model names, short terms anh needs to recognise (e.g. title, smog, KBB), URLs, and ONE short English line meant for anh to say out loud (e.g. a bargaining line) — keep that line in English with its Vietnamese meaning right after in parentheses.
 
 If the text contains a marker like [[TITO-KEEP-1]], keep every marker exactly where it is, exactly once, and do not change it.
 Return JSON only: {"ok": true} if nothing breaks, else {"ok": false, "edited": "<the full fixed text>"}."""
+
+TITO_GUARD_RULES = _TITO_GUARD_RULES_TEMPLATE.replace(
+    "{MAX_SENTENCES}", str(MAX_SENTENCES)
+).replace("{MAX_SENTENCE_WORDS}", str(MAX_SENTENCE_WORDS))
 
 # Invisible parts of the persisted message. Matched spans are never sent to
 # Haiku and are re-inserted from the original string, so they cannot drift.
@@ -60,7 +70,9 @@ _FORBIDDEN_WORDS_RE = re.compile(
 # "AI" is only the acronym: a case-insensitive match would hit the everyday
 # Vietnamese word "ai" (who) in almost every reply.
 _AI_ACRONYM_RE = re.compile(r"\bAI\b")
-_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
+# A sentence ends at . ! or ? followed by a space; a closing straight or curly
+# double quote right after the mark still ends it ("...hôm nay." Anh ăn?).
+_SENTENCE_END_RE = re.compile(r'[.!?]["”]?(?=\s)')
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,:/-]\d+)*")
 _URL_RE = re.compile(r"https?://[^\s<>\"']+")
@@ -248,6 +260,32 @@ def _rule_units(paragraph: str) -> list:
     return units
 
 
+# Trailing sentence punctuation that a URL token may carry ("...values.").
+_URL_TAIL_RE = re.compile(r"[.,;:!?)\]}'\"]*$")
+
+
+def _blank_urls(text: str) -> str:
+    """Replace each URL by a space, keeping any sentence punctuation after it."""
+    return _URL_RE.sub(lambda m: " " + _URL_TAIL_RE.search(m.group(0)).group(0), text)
+
+
+def _long_unit(unit: str) -> bool:
+    """True when one paragraph, line or list item breaks the length limits.
+
+    URLs and short quoted English lines are not counted, as in the other checks.
+    Sentences split on the same rule as before; words are whitespace tokens.
+    """
+    counted = _strip_short_quotes(_blank_urls(unit), english_only=True).strip()
+    if not counted:
+        return False
+    sentences = [part for part in _SENTENCE_END_RE.split(counted) if part.strip()]
+    if len(sentences) > MAX_SENTENCES:
+        return True
+    if any(len(sentence.split()) > MAX_SENTENCE_WORDS for sentence in sentences):
+        return True
+    return len(counted.split()) > MAX_UNIT_WORDS
+
+
 def tito_guard_trigger(text: str) -> "str | None":
     """Cheap local pre-check: name of the first rule signal, or None when clean."""
     if not text or not text.strip():
@@ -268,7 +306,7 @@ def tito_guard_trigger(text: str) -> "str | None":
         if not paragraph:
             continue
         for unit in _rule_units(paragraph):
-            if len(_SENTENCE_END_RE.split(unit.strip())) > 3:
+            if _long_unit(unit):
                 return "long_paragraph"
     if _has_english_run(_english_scan_text(text)):
         return "english_sentence"

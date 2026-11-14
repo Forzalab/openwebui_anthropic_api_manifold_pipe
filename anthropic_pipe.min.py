@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.2
+version: 0.12.3
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.3
+- Tito output guard: paragraphs, lines and list items stay at 1 to 3 sentences (`MAX_SENTENCES` 3, unchanged) and now also get word caps, each sentence at most 25 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 45 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
+
 v0.12.2
 - System split (N1) also matches each profile's memory heading (`snapshot_heading`; mimi = "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN", must match OWUI). Tito heading tried first, unchanged.
 
@@ -2680,7 +2683,11 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
 
 TITO_GUARD_MODEL = "claude-haiku-5-5"
 
-TITO_GUARD_RULES = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
+MAX_SENTENCES = 3
+MAX_SENTENCE_WORDS = 25
+MAX_UNIT_WORDS = 45
+
+_TITO_GUARD_RULES_TEMPLATE = """You fix a reply from "Tito", an old Vietnamese friend talking to "anh Đính" on a phone. Make the SMALLEST edits so all rules hold. NEVER change facts, numbers, dates, names, places, prices, links, or meaning. NEVER add new information.
 
 1. Exactly ONE question, as the very last sentence, ending with "?". Remove or turn other questions into statements. If there is no question, add ONE short warm question that fits the reply. A "?" inside the English line anh is meant to say out loud does not count as Tito's question.
 2. Tito calls himself "Tito", never "tôi"/"em"/"con". Dad = "anh" / "anh Đính". Mom = "chị Ngân". Son = "thằng Tùng". Never "Tony", never "ông" for Dad.
@@ -2689,12 +2696,16 @@ TITO_GUARD_RULES = """You fix a reply from "Tito", an old Vietnamese friend talk
 5. No telling him to sleep, rest, stop, or "để mai" unless he said he is tired.
 6. No flattery opener about his question ("câu hỏi hay", "đúng ý").
 7. No lecture or moralizing sentence; keep facts.
-8. Paragraphs: 1 to 3 short sentences, blank line between. No long dashes (— –); use commas or periods. Each line or paragraph, including each list item: 1 to 3 short sentences. A very short sentence is fine for emphasis or a new topic. Lists are fine.
+8. Paragraphs: 1 to {MAX_SENTENCES} short sentences, about {MAX_SENTENCE_WORDS} words max each, blank line between. No long dashes (— –); use commas or periods. Each line or paragraph, including each list item: 1 to {MAX_SENTENCES} short sentences, about {MAX_SENTENCE_WORDS} words max each. A very short sentence is fine for emphasis or a new topic. Lists are fine.
 9. Do not quote poems.
 10. Write every sentence in Vietnamese. Translate or paraphrase any English sentence or English quote into natural Vietnamese. Keep English only for: names, brands, model names, short terms anh needs to recognise (e.g. title, smog, KBB), URLs, and ONE short English line meant for anh to say out loud (e.g. a bargaining line) — keep that line in English with its Vietnamese meaning right after in parentheses.
 
 If the text contains a marker like [[TITO-KEEP-1]], keep every marker exactly where it is, exactly once, and do not change it.
 Return JSON only: {"ok": true} if nothing breaks, else {"ok": false, "edited": "<the full fixed text>"}."""
+
+TITO_GUARD_RULES = _TITO_GUARD_RULES_TEMPLATE.replace(
+    "{MAX_SENTENCES}", str(MAX_SENTENCES)
+).replace("{MAX_SENTENCE_WORDS}", str(MAX_SENTENCE_WORDS))
 
 _HIDDEN_PATTERNS = (
 
@@ -2713,7 +2724,8 @@ _FORBIDDEN_WORDS_RE = re.compile(
 )
 
 _AI_ACRONYM_RE = re.compile(r"\bAI\b")
-_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
+
+_SENTENCE_END_RE = re.compile(r'[.!?]["”]?(?=\s)')
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,:/-]\d+)*")
 _URL_RE = re.compile(r"https?://[^\s<>\"']+")
@@ -2866,6 +2878,22 @@ def _rule_units(paragraph: str) -> list:
         units.append("\n".join(plain))
     return units
 
+_URL_TAIL_RE = re.compile(r"[.,;:!?)\]}'\"]*$")
+
+def _blank_urls(text: str) -> str:
+    return _URL_RE.sub(lambda m: " " + _URL_TAIL_RE.search(m.group(0)).group(0), text)
+
+def _long_unit(unit: str) -> bool:
+    counted = _strip_short_quotes(_blank_urls(unit), english_only=True).strip()
+    if not counted:
+        return False
+    sentences = [part for part in _SENTENCE_END_RE.split(counted) if part.strip()]
+    if len(sentences) > MAX_SENTENCES:
+        return True
+    if any(len(sentence.split()) > MAX_SENTENCE_WORDS for sentence in sentences):
+        return True
+    return len(counted.split()) > MAX_UNIT_WORDS
+
 def tito_guard_trigger(text: str) -> "str | None":
     if not text or not text.strip():
         return None
@@ -2885,7 +2913,7 @@ def tito_guard_trigger(text: str) -> "str | None":
         if not paragraph:
             continue
         for unit in _rule_units(paragraph):
-            if len(_SENTENCE_END_RE.split(unit.strip())) > 3:
+            if _long_unit(unit):
                 return "long_paragraph"
     if _has_english_run(_english_scan_text(text)):
         return "english_sentence"

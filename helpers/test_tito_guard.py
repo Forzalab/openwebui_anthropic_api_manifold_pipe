@@ -489,6 +489,103 @@ async def test_real_english_sentence_triggers():
     assert GUARD.tito_guard_trigger(text) == "english_sentence", GUARD.tito_guard_trigger(text)
 
 
+def _sentence(n_words: int, end: str = ".") -> str:
+    """A Vietnamese-looking sentence of exactly n_words whitespace tokens."""
+    return " ".join(["nhớ"] * (n_words - 1) + [f"anh{end}"])
+
+
+async def test_three_sentences_pass_four_trigger():
+    """Limit stays 3 sentences per paragraph for Tito: three pass, four are long."""
+    three = "Hôm nay trời đẹp ghê. Tito nấu cơm nha. Anh ăn cơm chưa?"
+    assert GUARD.tito_guard_trigger(three) is None, GUARD.tito_guard_trigger(three)
+
+    four = "Hôm nay trời đẹp ghê. Tito nấu cơm nha. Cơm ngon lắm. Anh ăn cơm chưa?"
+    assert GUARD.tito_guard_trigger(four) == "long_paragraph", GUARD.tito_guard_trigger(four)
+
+
+async def test_closing_quote_ends_a_sentence():
+    """A quote that closes after . ends the sentence: four sentences are long."""
+    text = 'Bác nói: "Được rồi nha." Tito cũng vậy. Cơm ngon lắm. Anh ăn cơm chưa?'
+    assert GUARD.tito_guard_trigger(text) == "long_paragraph", GUARD.tito_guard_trigger(text)
+
+
+async def test_four_sentence_list_item_is_long_paragraph():
+    """Each list item is judged alone: four sentences in one item trigger."""
+    text = (
+        "Anh nên làm mấy việc này:\n"
+        "- Kiểm tra máy. Thay dầu nha. Rửa xe luôn. Bơm bánh xe.\n"
+        "- Mua nước nha. Anh thấy sao?"
+    )
+    assert GUARD.tito_guard_trigger(text) == "long_paragraph", GUARD.tito_guard_trigger(text)
+
+
+async def test_sentence_word_cap_is_twenty_five():
+    """A sentence of 25 words passes; 26 words is long_paragraph."""
+    assert GUARD.MAX_SENTENCE_WORDS == 25 and GUARD.MAX_SENTENCES == 3
+    assert GUARD.MAX_UNIT_WORDS == 45
+    ok = f"{_sentence(25)} Anh ăn cơm chưa?"
+    assert GUARD.tito_guard_trigger(ok) is None, GUARD.tito_guard_trigger(ok)
+
+    long_one = f"{_sentence(26)} Anh ăn cơm chưa?"
+    assert GUARD.tito_guard_trigger(long_one) == "long_paragraph", GUARD.tito_guard_trigger(long_one)
+
+
+async def test_unit_word_cap_is_forty_five():
+    """Two sentences of 22 + 23 words pass; 23 + 23 (46 words) is long_paragraph."""
+    ok = f"{_sentence(22)} {_sentence(23, '?')}"
+    assert GUARD.tito_guard_trigger(ok) is None, GUARD.tito_guard_trigger(ok)
+
+    over = f"{_sentence(23)} {_sentence(23, '?')}"
+    assert GUARD.tito_guard_trigger(over) == "long_paragraph", GUARD.tito_guard_trigger(over)
+
+
+async def test_list_item_word_cap_is_forty_five():
+    """The 45-word cap applies to each list item, not only to plain paragraphs."""
+    ok = (
+        "Anh nên làm mấy việc này:\n"
+        f"- {_sentence(22)} {_sentence(23)}\n"
+        "- Mua nước nha. Anh thấy sao?"
+    )
+    assert GUARD.tito_guard_trigger(ok) is None, GUARD.tito_guard_trigger(ok)
+
+    over = (
+        "Anh nên làm mấy việc này:\n"
+        f"- {_sentence(23)} {_sentence(23)}\n"
+        "- Mua nước nha. Anh thấy sao?"
+    )
+    assert GUARD.tito_guard_trigger(over) == "long_paragraph", GUARD.tito_guard_trigger(over)
+
+
+async def test_url_is_not_counted_for_words_or_sentences():
+    """A URL token is not a word: real words plus a URL still pass."""
+    with_url = (
+        " ".join(["nhớ"] * 19)
+        + " https://www.kbb.com/toyota/camry/2009/values anh. Anh ăn cơm chưa?"
+    )
+    assert GUARD.tito_guard_trigger(with_url) is None, GUARD.tito_guard_trigger(with_url)
+
+    # A URL that ends a sentence still ends it: four sentences stay long.
+    url_end = "Xem https://www.kbb.com/values. Hôm nay trời đẹp ghê. Cơm ngon lắm. Anh ăn cơm chưa?"
+    assert GUARD.tito_guard_trigger(url_end) == "long_paragraph", GUARD.tito_guard_trigger(url_end)
+
+
+async def test_short_quoted_english_is_not_counted_for_words():
+    """A quoted English line of 12 words or fewer adds no words to the sentence."""
+    # 17 Vietnamese words + a 12-word English quote + "nhớ." would be 30 words
+    # if the quote were counted, so the pass proves the quote is not counted.
+    quote12 = "Would you take forty five dollars for this car today sir thanks"
+    assert len(quote12.split()) == 12
+    prefix = " ".join(["nhớ"] * 17)
+    text = f'{prefix} "{quote12}" nhớ. Anh thấy sao?'
+    assert GUARD.tito_guard_trigger(text) is None, GUARD.tito_guard_trigger(text)
+
+    # A 13-word quote is not exempt: 17 + 13 + 1 words is over 25.
+    quote13 = quote12 + " now"
+    assert len(quote13.split()) == 13
+    text = f'{prefix} "{quote13}" nhớ. Anh thấy sao?'
+    assert GUARD.tito_guard_trigger(text) == "long_paragraph", GUARD.tito_guard_trigger(text)
+
+
 async def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:
