@@ -418,6 +418,17 @@ class PipeOrchestratorMethods:
                             # and its lines join the VN reminder slot. Never raises.
                             tito_inject_text = await self._tito_decide_inject(tito_decide_state)
                             tito_decide_state = None
+                    # Mimi one-turn injections (profile "injects": goose once per person,
+                    # else bear news): joined into the same VN reminder slot. Mimi has
+                    # decide off, so tito_inject_text is "" there.
+                    if (
+                        self.TITO_ACTIVE.get()
+                        and tool_loop_iteration == 1
+                        and not is_internal
+                        and self._tito_active_profile().get("injects")
+                    ):
+                        _mimi_inject = await self._tito_mimi_inject(payload_for_stream, __metadata__, __user__)
+                        tito_inject_text = "\n\n".join(part for part in (tito_inject_text, _mimi_inject) if part)
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
                         vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream, tito_inject_text)
                     # Dump the full (stripped) outgoing payload so we can audit

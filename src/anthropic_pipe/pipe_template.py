@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.0
+version: 0.12.1
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.1
+- Mimi one-turn injections (first user turn of a chat only, same slot as the VN reminder, never logged): goose once per person (no earlier mimi chat; valve `MIMI_GOOSE_INJECT`), otherwise bear news for 1 in `MIMI_BEAR_RATE` chats (valve `MIMI_BEAR_INJECT`, default rate 10, 0 = off). Tito and other models unchanged.
+
 v0.12.0
 - Tito stack is per model: a profile table (`TITO_PROFILES`) keyed by OWUI model id. `tito` keeps today's values exactly. New model `mimi` (the Mimi companion) runs the same stack with its own budget caps (`MIMI_HARD_CAP_USD` 10 / `MIMI_SOFT_CAP_USD` 6), spend sum over its own messages only, its own reminder valve (`MIMI_VN_REMINDER`, default off), its own tools file (`MIMI_TOOLS_FILE`, falls back to `TITO_TOOLS_FILE`), its own Vietnamese texts, and no output guard and no TITO_DECIDE checks. Discord alerts use the profile label.
 
@@ -1073,6 +1076,22 @@ class Pipe:
         MIMI_VN_REMINDER: str = Field(
             default="",
             description="Mimi only. Same as TITO_VN_REMINDER, for the mimi model. Empty = off. Not logged.",
+        )
+        MIMI_GOOSE_INJECT: str = Field(
+            default="First meeting with bạn. After the answer, Mimi mentions her new friend once, warmly and briefly: a white goose, soft and squishy, whose neck flops when hugged.",
+            description="Mimi only. One-turn text on the first user turn of a chat, for a user with no earlier "
+            "mimi chat (goose once per person). Empty = off. Not logged.",
+        )
+        MIMI_BEAR_INJECT: str = Field(
+            default="If the mood is light and there is room, Mimi adds one short line of news from the bear forest, her neighbors in the Đà Lạt pines. In health, money or sad moments, the answer and bạn come first and the forest stays quiet.",
+            description="Mimi only. One-turn text on the first user turn of a chat picked by MIMI_BEAR_RATE, when "
+            "no goose fired. Empty = off. Not logged.",
+        )
+        MIMI_BEAR_RATE: int = Field(
+            default=10,
+            ge=0,
+            description="Mimi only. About 1 in N chats gets the bear injection (deterministic per chat id). "
+            "0 = off.",
         )
         TITO_DECIDE: bool = Field(
             default=False,
