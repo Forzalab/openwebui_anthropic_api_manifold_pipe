@@ -81,6 +81,7 @@ class PipeTitoMethods:
         "guard": True,            # output guard (_tito_output_guard) on
         "decide": True,           # TITO_DECIDE shadow / inject / pure_vn on
         "injects": False,         # mimi goose / bear one-turn injections (_tito_mimi_inject) off
+        "thinking": True,         # extended thinking on (TITO_CONFIG thinking); mimi off
         "vn_reminder_valve": "TITO_VN_REMINDER",
         "hard_cap_env": "TITO_HARD_CAP_USD",
         "hard_cap_default": 22.0,
@@ -104,6 +105,9 @@ class PipeTitoMethods:
             "guard": False,
             "decide": False,
             "injects": True,
+            # No thinking: Conduit shows the reasoning <details> carrier raw for
+            # non-Tito OWUI models, and translation does not need it.
+            "thinking": False,
             "vn_reminder_valve": "MIMI_VN_REMINDER",
             "hard_cap_env": "MIMI_HARD_CAP_USD",
             "hard_cap_default": 10.0,

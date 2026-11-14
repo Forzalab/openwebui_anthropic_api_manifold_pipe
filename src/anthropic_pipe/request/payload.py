@@ -98,8 +98,10 @@ async def create_request_payload(
         logger.debug(f"Effort level set to: {effective_effort}")
 
     # Handle Thinking
+    _tito_profile_fn = getattr(pipe, "_tito_profile", None)
+    _tito_prof = (_tito_profile_fn(__metadata__) if (is_tito and callable(_tito_profile_fn)) else None) or {}
     enable_thinking = (
-        True
+        bool(_tito_prof.get("thinking", True))
         if is_tito
         else (
             __user__["valves"].ENABLE_THINKING

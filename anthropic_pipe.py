@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.3
+version: 0.12.4
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.4
+- Profile key `thinking`: tito keeps extended thinking (unchanged); mimi runs with thinking off, so no reasoning `<details>` carrier reaches clients (Conduit showed it raw).
+
 v0.12.3
 - Tito output guard: paragraphs, lines and list items stay at 1 to 3 sentences (`MAX_SENTENCES` 3, unchanged) and now also get word caps, each sentence at most 25 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 45 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
 
@@ -972,8 +975,10 @@ async def create_request_payload(
         logger.debug(f"Effort level set to: {effective_effort}")
 
     # Handle Thinking
+    _tito_profile_fn = getattr(pipe, "_tito_profile", None)
+    _tito_prof = (_tito_profile_fn(__metadata__) if (is_tito and callable(_tito_profile_fn)) else None) or {}
     enable_thinking = (
-        True
+        bool(_tito_prof.get("thinking", True))
         if is_tito
         else (
             __user__["valves"].ENABLE_THINKING
@@ -11829,6 +11834,7 @@ class Pipe:
         "guard": True,            # output guard (_tito_output_guard) on
         "decide": True,           # TITO_DECIDE shadow / inject / pure_vn on
         "injects": False,         # mimi goose / bear one-turn injections (_tito_mimi_inject) off
+        "thinking": True,         # extended thinking on (TITO_CONFIG thinking); mimi off
         "vn_reminder_valve": "TITO_VN_REMINDER",
         "hard_cap_env": "TITO_HARD_CAP_USD",
         "hard_cap_default": 22.0,
@@ -11852,6 +11858,9 @@ class Pipe:
             "guard": False,
             "decide": False,
             "injects": True,
+            # No thinking: Conduit shows the reasoning <details> carrier raw for
+            # non-Tito OWUI models, and translation does not need it.
+            "thinking": False,
             "vn_reminder_valve": "MIMI_VN_REMINDER",
             "hard_cap_env": "MIMI_HARD_CAP_USD",
             "hard_cap_default": 10.0,
