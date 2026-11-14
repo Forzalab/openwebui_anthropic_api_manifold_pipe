@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.12.1`
+- **Current pipe version:** `0.12.2`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
@@ -236,6 +236,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.12.2`
+- System split (N1) also matches each profile's memory heading (mimi: "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN"). Tito unchanged
+
 ### `v0.12.1`
 - Mimi one-turn injections, first user turn of a chat only, in the same slot as the VN reminder and never logged. Goose once per person (no earlier mimi chat; valve `MIMI_GOOSE_INJECT`), otherwise bear news for 1 in `MIMI_BEAR_RATE` chats (valve `MIMI_BEAR_INJECT`, default rate 10, 0 = off). Tito and other models unchanged
 
