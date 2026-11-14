@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.12.0`
+- **Current pipe version:** `0.12.1`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
@@ -236,6 +236,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.12.1`
+- Mimi one-turn injections, first user turn of a chat only, in the same slot as the VN reminder and never logged. Goose once per person (no earlier mimi chat; valve `MIMI_GOOSE_INJECT`), otherwise bear news for 1 in `MIMI_BEAR_RATE` chats (valve `MIMI_BEAR_INJECT`, default rate 10, 0 = off). Tito and other models unchanged
+
 ### `v0.12.0`
 - Tito stack is per model: a profile table (`TITO_PROFILES`) keyed by OWUI model id. `tito` keeps today's values exactly. New model `mimi` (the Mimi companion) runs the same stack with its own budget caps (`MIMI_HARD_CAP_USD` 10 / `MIMI_SOFT_CAP_USD` 6), spend sum over its own messages only, its own reminder valve (`MIMI_VN_REMINDER`, default off), its own tools file (`MIMI_TOOLS_FILE`, falls back to `TITO_TOOLS_FILE`), its own Vietnamese texts, and no output guard and no TITO_DECIDE checks. Discord alerts use the profile label.
 

@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.0
+version: 0.12.1
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.1
+- Mimi one-turn injections (first user turn of a chat only, same slot as the VN reminder, never logged): goose once per person (no earlier mimi chat; valve `MIMI_GOOSE_INJECT`), otherwise bear news for 1 in `MIMI_BEAR_RATE` chats (valve `MIMI_BEAR_INJECT`, default rate 10, 0 = off). Tito and other models unchanged.
+
 v0.12.0
 - Tito stack is per model: a profile table (`TITO_PROFILES`) keyed by OWUI model id. `tito` keeps today's values exactly. New model `mimi` (the Mimi companion) runs the same stack with its own budget caps (`MIMI_HARD_CAP_USD` 10 / `MIMI_SOFT_CAP_USD` 6), spend sum over its own messages only, its own reminder valve (`MIMI_VN_REMINDER`, default off), its own tools file (`MIMI_TOOLS_FILE`, falls back to `TITO_TOOLS_FILE`), its own Vietnamese texts, and no output guard and no TITO_DECIDE checks. Discord alerts use the profile label.
 
@@ -4110,6 +4113,22 @@ class Pipe:
         MIMI_VN_REMINDER: str = Field(
             default="",
             description="Mimi only. Same as TITO_VN_REMINDER, for the mimi model. Empty = off. Not logged.",
+        )
+        MIMI_GOOSE_INJECT: str = Field(
+            default="First meeting with bạn. After the answer, Mimi mentions her new friend once, warmly and briefly: a white goose, soft and squishy, whose neck flops when hugged.",
+            description="Mimi only. One-turn text on the first user turn of a chat, for a user with no earlier "
+            "mimi chat (goose once per person). Empty = off. Not logged.",
+        )
+        MIMI_BEAR_INJECT: str = Field(
+            default="If the mood is light and there is room, Mimi adds one short line of news from the bear forest, her neighbors in the Đà Lạt pines. In health, money or sad moments, the answer and bạn come first and the forest stays quiet.",
+            description="Mimi only. One-turn text on the first user turn of a chat picked by MIMI_BEAR_RATE, when "
+            "no goose fired. Empty = off. Not logged.",
+        )
+        MIMI_BEAR_RATE: int = Field(
+            default=10,
+            ge=0,
+            description="Mimi only. About 1 in N chats gets the bear injection (deterministic per chat id). "
+            "0 = off.",
         )
         TITO_DECIDE: bool = Field(
             default=False,
@@ -10365,6 +10384,17 @@ class Pipe:
                             # and its lines join the VN reminder slot. Never raises.
                             tito_inject_text = await self._tito_decide_inject(tito_decide_state)
                             tito_decide_state = None
+                    # Mimi one-turn injections (profile "injects": goose once per person,
+                    # else bear news): joined into the same VN reminder slot. Mimi has
+                    # decide off, so tito_inject_text is "" there.
+                    if (
+                        self.TITO_ACTIVE.get()
+                        and tool_loop_iteration == 1
+                        and not is_internal
+                        and self._tito_active_profile().get("injects")
+                    ):
+                        _mimi_inject = await self._tito_mimi_inject(payload_for_stream, __metadata__, __user__)
+                        tito_inject_text = "\n\n".join(part for part in (tito_inject_text, _mimi_inject) if part)
                     if self.TITO_ACTIVE.get() and tool_loop_iteration == 1:
                         vn_reminder_state = self._tito_vn_reminder_apply(payload_for_stream, tito_inject_text)
                     # Dump the full (stripped) outgoing payload so we can audit
@@ -11760,6 +11790,7 @@ class Pipe:
         "label": "Tito",
         "guard": True,            # output guard (_tito_output_guard) on
         "decide": True,           # TITO_DECIDE shadow / inject / pure_vn on
+        "injects": False,         # mimi goose / bear one-turn injections (_tito_mimi_inject) off
         "vn_reminder_valve": "TITO_VN_REMINDER",
         "hard_cap_env": "TITO_HARD_CAP_USD",
         "hard_cap_default": 22.0,
@@ -11779,6 +11810,7 @@ class Pipe:
             "label": "Mimi",
             "guard": False,
             "decide": False,
+            "injects": True,
             "vn_reminder_valve": "MIMI_VN_REMINDER",
             "hard_cap_env": "MIMI_HARD_CAP_USD",
             "hard_cap_default": 10.0,
@@ -12286,6 +12318,75 @@ class Pipe:
         if isinstance(info, dict) and isinstance(info.get("model"), str):
             return info["model"]
         return ""
+
+    @staticmethod
+    def _tito_chat_owner(chat) -> tuple:
+        """(chat id, owner user id) of a chat row, dict or ChatModel; None when absent."""
+        if isinstance(chat, dict):
+            return chat.get("id"), chat.get("user_id")
+        return getattr(chat, "id", None), getattr(chat, "user_id", None)
+
+    async def _tito_mimi_goose_due(self, chat_id, user_id) -> bool:
+        """True when this user has no earlier chat with a mimi message.
+
+        Fail closed: no Chats, a missing id or any error returns False, so the
+        goose can never repeat. The current chat is skipped.
+        """
+        if not isinstance(chat_id, str) or not chat_id or not isinstance(user_id, str) or not user_id:
+            return False
+        try:
+            chats_cls = globals().get("Chats")
+            if not globals().get("CHATS_AVAILABLE", False) or chats_cls is None:
+                return False
+            chats = chats_cls.get_chats()
+            if hasattr(chats, "__await__"):
+                chats = await chats
+            for chat in chats or []:
+                cid, owner = self._tito_chat_owner(chat)
+                if owner != user_id or cid == chat_id:
+                    continue
+                for msg in self._tito_chat_messages(chat):
+                    if self._tito_message_model(msg) == "mimi":
+                        return False
+            return True
+        except Exception as e:
+            self._tito_err("mimi_goose", e)
+            return False
+
+    def _tito_mimi_bear_due(self, chat_id) -> bool:
+        """Deterministic 1-in-N pick per chat (valve MIMI_BEAR_RATE; 0 = off)."""
+        rate = int(getattr(self.valves, "MIMI_BEAR_RATE", 10) or 0)
+        if rate <= 0 or not isinstance(chat_id, str) or not chat_id:
+            return False
+        return int(hashlib.sha256(chat_id.encode("utf-8")).hexdigest(), 16) % rate == 0
+
+    async def _tito_mimi_inject(self, payload, metadata, user) -> str:
+        """One-turn text for the mimi model, joined into the VN reminder slot.
+
+        Only on the first user turn of a chat (exactly one role=="user" message).
+        Goose (once per person, first mimi chat) wins over bear (1 in N chats).
+        Returns "" when neither fires. Never logs the text or any id.
+        """
+        try:
+            messages = (payload or {}).get("messages") or []
+            users = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
+            if len(users) != 1:
+                return ""
+            chat_id = (metadata or {}).get("chat_id")
+            user_id = (user or {}).get("id")
+            goose_text = str(getattr(self.valves, "MIMI_GOOSE_INJECT", "") or "").strip()
+            bear_text = str(getattr(self.valves, "MIMI_BEAR_INJECT", "") or "").strip()
+            if goose_text and await self._tito_mimi_goose_due(chat_id, user_id):
+                kind, text = "goose", goose_text
+            elif bear_text and self._tito_mimi_bear_due(chat_id):
+                kind, text = "bear", bear_text
+            else:
+                kind, text = "none", ""
+            logger.info(f"{self._tito_tag()} inject=%s", kind)
+            return text
+        except Exception as e:
+            self._tito_err("mimi_inject", e)
+            return ""
 
     def _tito_log_fingerprint(self, payload: dict, metadata) -> None:
         """Log one fingerprint line per turn; warn + Discord on tools/system drift."""
