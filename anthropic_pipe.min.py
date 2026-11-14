@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.5
+version: 0.12.6
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.6
+- Profile key `hide_thinking` (mimi): thinking stays on but is never shown; the finished block rides the invisible `[anthropic-hidden]` carrier and replays next turn. Tito unchanged.
+
 v0.12.5
 - mimi thinking back on (profile `thinking` True). Deploy only together with the open-webui build where `is_tito_model` covers mimi, which renders the reasoning block folded.
 
@@ -6971,6 +6974,15 @@ class Pipe:
 
             return ""
 
+        _prof_cv = getattr(self, "TITO_PROFILE", None)
+        _prof = _prof_cv.get() if _prof_cv is not None else None
+        if isinstance(_prof, dict) and _prof.get("hide_thinking"):
+            if duration is None or not signature:
+                return ""
+            return self._format_hidden_block(
+                [{"type": "thinking", "thinking": content, "signature": signature}]
+            )
+
         escaped_lines = "\n".join(
             f"> {html.escape(line)}" if not line.startswith(">") else html.escape(line)
             for line in content.splitlines()
@@ -9589,6 +9601,7 @@ class Pipe:
         "decide": True,
         "injects": False,
         "thinking": True,
+        "hide_thinking": False,
         "vn_reminder_valve": "TITO_VN_REMINDER",
         "hard_cap_env": "TITO_HARD_CAP_USD",
         "hard_cap_default": 22.0,
@@ -9614,6 +9627,8 @@ class Pipe:
             "injects": True,
 
             "thinking": True,
+
+            "hide_thinking": True,
             "vn_reminder_valve": "MIMI_VN_REMINDER",
             "hard_cap_env": "MIMI_HARD_CAP_USD",
             "hard_cap_default": 10.0,
