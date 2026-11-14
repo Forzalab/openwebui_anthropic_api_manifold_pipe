@@ -45,6 +45,8 @@ class PipeOrchestratorMethods:
         # Tito (D4): set once per request so deep methods (messages, cache,
         # runtime) can read it without threading metadata through the call chain.
         self.TITO_ACTIVE.set(bool(self._is_tito(__metadata__)))
+        # Tito profile (tito / mimi) of this request; None for every other model.
+        self.TITO_PROFILE.set(self._tito_profile(__metadata__))
         # Content-block dispatch. Handlers own one block family each and read
         # everything off request_ctx; families not migrated yet return False and
         # fall through to the inline chain below.
@@ -156,10 +158,12 @@ class PipeOrchestratorMethods:
                     if _warned is None:
                         _warned = set()
                         self._tito_soft_warned = _warned
-                    if _month_key not in _warned:
-                        _warned.add(_month_key)
+                    # Keyed by profile too, so mimi's soft warning is not hidden by tito's.
+                    _warn_key = (self._tito_active_profile()["id"], _month_key)
+                    if _warn_key not in _warned:
+                        _warned.add(_warn_key)
                         self._tito_discord_alert(
-                            f"Tito: soft budget cap reached (${_spend:.2f} USD) for {_month_key}"
+                            f"{self._tito_label()}: soft budget cap reached (${_spend:.2f} USD) for {_month_key}"
                         )
 
             # STEP 2: Await tools if needed
@@ -670,7 +674,7 @@ class PipeOrchestratorMethods:
                                                             tool_use_id, tool_name
                                                         )["content"]
                                                         self._tito_discord_alert(
-                                                            f"Tito: missing live tool '{tool_name}'"
+                                                            f"{self._tito_label()}: missing live tool '{tool_name}'"
                                                         )
 
                                                 # Process tool result through OpenWebUI's handler
@@ -1242,7 +1246,7 @@ class PipeOrchestratorMethods:
                             )
                             if self.TITO_ACTIVE.get():
                                 self._tito_discord_alert(
-                                    "Tito: truncated stream, max retries exhausted"
+                                    f"{self._tito_label()}: truncated stream, max retries exhausted"
                                 )
                                 await request_ctx.emit_delta(self._tito_error_text())
                             else:
@@ -1608,7 +1612,7 @@ class PipeOrchestratorMethods:
                 ) or "none"
             except Exception as _guard_err:
                 logger.warning(
-                    "[TITO] output guard failed (keeping reply): %s", _guard_err
+                    f"{self._tito_tag()} output guard failed (keeping reply): %s", _guard_err
                 )
             finally:
                 _guard_t0 = request_ctx.timing.pop("guard_t0", None)

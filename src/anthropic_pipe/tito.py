@@ -21,7 +21,7 @@ class PipeTitoMethods:
     """Everything gated on the OWUI model id ``tito``.
 
     All state that must survive across turns is kept lazily on the instance
-    (``_tito_spend_cache``, ``_tito_soft_warned``, ``_tito_fingerprint_state``)
+    (``_tito_spend_caches``, ``_tito_soft_warned``, ``_tito_fingerprint_state``)
     rather than in ``__init__``, so the mixin does not need to touch the
     template's constructor.
     """
@@ -32,6 +32,11 @@ class PipeTitoMethods:
     # for the same reason as HIDDEN_BLOCKS / SLIM_OUTPUT in pipe_template.py.
     TITO_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
         "anthropic_pipe_tito_active", default=False
+    )
+    # The profile (an entry of TITO_PROFILES) of the request in flight, or None.
+    # Set next to TITO_ACTIVE in pipe_orchestrator. Helpers without metadata read it.
+    TITO_PROFILE: contextvars.ContextVar = contextvars.ContextVar(
+        "anthropic_pipe_tito_profile", default=None
     )
 
     # Frozen config for "tito" (SPEC section 2). Keys not present here fall
@@ -60,20 +65,91 @@ class PipeTitoMethods:
     # Copied (not imported) from open-webui backend/open_webui/utils/tito.py.
     TITO_SNAPSHOT_HEADING = "NHỮNG ĐIỀU TITO NHỚ VỀ ANH"
     _TITO_ALERT_MAX = 500
-    _tito_tools_alerted = False  # once per process
+    _tito_tools_alerted = False  # global mute, kept for tests; alerts are per file below
+    _tito_tools_alert_paths: set = set()  # tools files already alerted in this process
 
     HARD_CAP_TEXT = "Tito đang nghỉ tới ngày 1 tháng sau. Dori đã biết rồi, ông không cần làm gì."
     TITO_ERROR_TEXT = "Tito đang bận một chút, ông thử lại sau vài phút nhé."
     TITO_MISSING_TOOL_TEXT = "Lịch tạm thời không dùng được, ông thử lại lát nữa nhé."
 
-    @staticmethod
-    def _is_tito(metadata) -> bool:
-        """True when the request is for the Tito model.
+    # Per-model profiles of the Tito stack, keyed by OWUI model id. "tito" holds
+    # today's values exactly. "mimi" is the same stack with its own caps, texts,
+    # spend filter and tools file. A model id with no entry gets no Tito stack.
+    _TITO_PROFILE_TITO: dict = {
+        "id": "tito",
+        "label": "Tito",
+        "guard": True,            # output guard (_tito_output_guard) on
+        "decide": True,           # TITO_DECIDE shadow / inject / pure_vn on
+        "vn_reminder_valve": "TITO_VN_REMINDER",
+        "hard_cap_env": "TITO_HARD_CAP_USD",
+        "hard_cap_default": 22.0,
+        "soft_cap_env": "TITO_SOFT_CAP_USD",
+        "soft_cap_default": 15.0,
+        "spend_model": None,      # None: sum every chat message's usage (all models)
+        "tools_env": "TITO_TOOLS_FILE",
+        "hard_cap_text": HARD_CAP_TEXT,
+        "error_text": TITO_ERROR_TEXT,
+        "missing_tool_text": TITO_MISSING_TOOL_TEXT,
+    }
+    TITO_PROFILES: dict = {
+        "tito": _TITO_PROFILE_TITO,
+        "mimi": {
+            **_TITO_PROFILE_TITO,
+            "id": "mimi",
+            "label": "Mimi",
+            "guard": False,
+            "decide": False,
+            "vn_reminder_valve": "MIMI_VN_REMINDER",
+            "hard_cap_env": "MIMI_HARD_CAP_USD",
+            "hard_cap_default": 10.0,
+            "soft_cap_env": "MIMI_SOFT_CAP_USD",
+            "soft_cap_default": 6.0,
+            "spend_model": "mimi",
+            "tools_env": "MIMI_TOOLS_FILE",
+            "hard_cap_text": "Mimi đi nghỉ tới ngày 1 tháng sau nha bạn. Tùng biết rồi, bạn không cần làm gì hết.",
+            "error_text": "Mimi đang bận xíu, bạn thử lại sau vài phút nha.",
+            "missing_tool_text": "Công cụ này tạm thời chưa dùng được, bạn thử lại lát nữa nha.",
+        },
+    }
+
+    @classmethod
+    def _tito_profile(cls, metadata):
+        """Profile dict for the OWUI model id in metadata, or None (no Tito stack).
 
         OWUI rewrites ``body["model"]`` to the base model id before the pipe sees
-        it, so the gate is the OWUI model id in metadata, never ``body["model"]``.
+        it, so the lookup is the OWUI model id in metadata, never ``body["model"]``.
         """
-        return (metadata or {}).get("model", {}).get("id") == "tito"
+        model = (metadata or {}).get("model")
+        model_id = model.get("id") if isinstance(model, dict) else None
+        if not isinstance(model_id, str):
+            return None
+        return cls.TITO_PROFILES.get(model_id)
+
+    @classmethod
+    def _is_tito(cls, metadata) -> bool:
+        """True when the request is for a model with a Tito profile (tito or mimi)."""
+        return cls._tito_profile(metadata) is not None
+
+    @classmethod
+    def _tito_active_profile(cls) -> dict:
+        """Profile of the request in flight (``TITO_PROFILE``); tito's when none is set."""
+        profile = cls.TITO_PROFILE.get()
+        return profile if profile is not None else cls.TITO_PROFILES["tito"]
+
+    @classmethod
+    def _tito_profile_flag(cls, key: str) -> bool:
+        """Boolean profile switch (``guard``, ``decide``) of the request in flight."""
+        return bool(cls._tito_active_profile().get(key))
+
+    @classmethod
+    def _tito_label(cls) -> str:
+        """Profile label for Discord alerts: "Tito" or "Mimi"."""
+        return cls._tito_active_profile()["label"]
+
+    @classmethod
+    def _tito_tag(cls) -> str:
+        """Log tag for [TITO]-style lines: "[TITO]" for tito, "[MIMI]" for mimi."""
+        return f"[{cls._tito_label().upper()}]"
 
     def _tito_quiet_ui(self, metadata) -> bool:
         """True when Tito's quiet UI applies: Tito request AND the valve is on."""
@@ -100,7 +176,8 @@ class PipeTitoMethods:
         """
         if not getattr(self.valves, "TITO_OUTPUT_GUARD", True):
             return "none"
-        if not self._is_tito(metadata):
+        profile = self._tito_profile(metadata)
+        if profile is None or not profile.get("guard"):
             return "none"
         timing = getattr(request_ctx, "timing", None)
         if timing is not None:
@@ -147,9 +224,9 @@ class PipeTitoMethods:
                     breakdown["guard"] = round(breakdown.get("guard", 0.0) + guard_usd, 6)
                     total_usage["cost_breakdown_usd"] = breakdown
             except Exception as exc:
-                logger.debug("[TITO] guard cost capture failed: %s", exc)
+                logger.debug(f"{self._tito_tag()} guard cost capture failed: %s", exc)
         logger.info(
-            "[TITO] output guard outcome=%s trigger=%s chars=%d visible=%d rebuilt=%d",
+            f"{self._tito_tag()} output guard outcome=%s trigger=%s chars=%d visible=%d rebuilt=%d",
             outcome,
             trigger,
             len(content),
@@ -190,10 +267,11 @@ class PipeTitoMethods:
     @classmethod
     def _tito_budget_decision(cls, month_spend_usd: float):
         """Pure decision function: (status, message) for a month's spend."""
-        hard = cls._tito_cap("TITO_HARD_CAP_USD", 22.0)
-        soft = cls._tito_cap("TITO_SOFT_CAP_USD", 15.0)
+        profile = cls._tito_active_profile()
+        hard = cls._tito_cap(profile["hard_cap_env"], profile["hard_cap_default"])
+        soft = cls._tito_cap(profile["soft_cap_env"], profile["soft_cap_default"])
         if month_spend_usd >= hard:
-            return ("hard", cls.HARD_CAP_TEXT)
+            return ("hard", profile["hard_cap_text"])
         if month_spend_usd >= soft:
             return ("soft", None)
         return ("ok", None)
@@ -282,12 +360,17 @@ class PipeTitoMethods:
         Missing / unreadable / empty is loud: ERROR log + one Discord alert per
         process (the tools array is part of the cache prefix).
         """
-        path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
+        profile = cls._tito_active_profile()
+        env_name = profile["tools_env"]
+        path = (os.environ.get(env_name) or "").strip()
+        if not path and env_name != "TITO_TOOLS_FILE":
+            # mimi falls back to tito's tools file when MIMI_TOOLS_FILE is unset.
+            path = (os.environ.get("TITO_TOOLS_FILE") or "").strip()
         problem = None
         err = None
         tools: list = []
         if not path:
-            problem = "TITO_TOOLS_FILE is not set"
+            problem = f"{env_name} is not set"
         else:
             try:
                 with open(path, "r", encoding="utf-8") as fh:
@@ -295,16 +378,19 @@ class PipeTitoMethods:
                 if isinstance(data, list):
                     tools = [t for t in data if isinstance(t, dict)]
                 if not tools:
-                    problem = f"TITO_TOOLS_FILE {path} has no tools"
+                    problem = f"{env_name} {path} has no tools"
             except Exception as e:
                 err = e
-                problem = f"TITO_TOOLS_FILE {path} unreadable: {cls._tito_safe_err(e)}"
+                problem = f"{env_name} {path} unreadable: {cls._tito_safe_err(e)}"
         if problem:
             # One TITO-ERR line per failure (the ERROR record for this turn).
             cls._tito_err("tools_file", err if err is not None else RuntimeError(problem))
-            if not cls._tito_tools_alerted:
-                cls._tito_tools_alerted = True
-                cls._tito_discord_alert(f"Tito: frozen tools unavailable: {problem}")
+            # Alert once per process and per file. _tito_tools_alerted stays a
+            # global mute (tests set it); the set holds the files already alerted.
+            alert_key = path or env_name
+            if not cls._tito_tools_alerted and alert_key not in cls._tito_tools_alert_paths:
+                cls._tito_tools_alert_paths.add(alert_key)
+                cls._tito_discord_alert(f"{cls._tito_label()}: frozen tools unavailable: {problem}")
         return tools
 
     @classmethod
@@ -361,14 +447,14 @@ class PipeTitoMethods:
         return {
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": cls.TITO_MISSING_TOOL_TEXT,
+            "content": cls._tito_active_profile()["missing_tool_text"],
             "is_error": True,
         }
 
     @classmethod
     def _tito_error_text(cls) -> str:
         """The fixed Vietnamese line shown to the user on any Tito API error."""
-        return cls.TITO_ERROR_TEXT
+        return cls._tito_active_profile()["error_text"]
 
     @classmethod
     def _tito_discord_alert(cls, message: str) -> None:
@@ -463,7 +549,13 @@ class PipeTitoMethods:
 
             now = _dt.now(_tz.utc)
 
-        cached = getattr(self, "_tito_spend_cache", None)
+        profile = self._tito_active_profile()
+        cache_key = profile["id"]
+        caches = getattr(self, "_tito_spend_caches", None)
+        if caches is None:
+            caches = {}
+            self._tito_spend_caches = caches
+        cached = caches.get(cache_key)
         if cached is not None:
             value, ts = cached
             if time.time() - ts < 60:
@@ -476,27 +568,48 @@ class PipeTitoMethods:
                 return 0.0
 
             month_key = self._tito_pacific_month(now)
+            spend_model = profile.get("spend_model")
             chats = chats_cls.get_chats()
             if hasattr(chats, "__await__"):
                 chats = await chats
             for chat in chats or []:
                 for msg in self._tito_chat_messages(chat):
-                    if self._tito_message_month(msg, now) == month_key:
-                        total += self._tito_usage_cost(msg)
+                    if self._tito_message_month(msg, now) != month_key:
+                        continue
+                    if spend_model is not None and self._tito_message_model(msg) != spend_model:
+                        continue
+                    total += self._tito_usage_cost(msg)
         except Exception as e:
             total = 0.0
             self._tito_err("month_spend", e)
             self._tito_discord_alert(
-                f"Tito: month_spend_usd DB error (fail-open): {self._tito_safe_err(e)}"
+                f"{self._tito_label()}: month_spend_usd DB error (fail-open): {self._tito_safe_err(e)}"
             )
 
-        setattr(self, "_tito_spend_cache", (total, time.time()))
+        caches[cache_key] = (total, time.time())
         return total
+
+    @staticmethod
+    def _tito_message_model(msg) -> str:
+        """OWUI model id that wrote a chat message, or "" when unknown.
+
+        UNKNOWN: the message shape is not verified against OWUI here. Assistant
+        messages are read from top-level ``model``; ``info.model`` is the fallback.
+        """
+        if not isinstance(msg, dict):
+            return ""
+        model = msg.get("model")
+        if isinstance(model, str) and model:
+            return model
+        info = msg.get("info")
+        if isinstance(info, dict) and isinstance(info.get("model"), str):
+            return info["model"]
+        return ""
 
     def _tito_log_fingerprint(self, payload: dict, metadata) -> None:
         """Log one fingerprint line per turn; warn + Discord on tools/system drift."""
         tools_sha, system_sha = self._tito_fingerprint_shas(payload)
-        logger.info("[TITO] %s", self._tito_fingerprint(payload))
+        logger.info(f"{self._tito_tag()} %s", self._tito_fingerprint(payload))
 
         chat_id = (metadata or {}).get("chat_id")
         if not chat_id:
@@ -508,14 +621,14 @@ class PipeTitoMethods:
         prev = state.get(chat_id)
         if prev is not None and (prev[0] != tools_sha or prev[1] != system_sha):
             logger.warning(
-                "[TITO] tools/system changed within chat_id=%s "
+                f"{self._tito_tag()} tools/system changed within chat_id=%s "
                 "(tools=%s system=%s)",
                 chat_id,
                 "changed" if prev[0] != tools_sha else "same",
                 "changed" if prev[1] != system_sha else "same",
             )
             self._tito_discord_alert(
-                f"Tito: tools/system fingerprint changed for chat_id={chat_id}"
+                f"{self._tito_label()}: tools/system fingerprint changed for chat_id={chat_id}"
             )
         state[chat_id] = (tools_sha, system_sha)
 
@@ -533,7 +646,8 @@ class PipeTitoMethods:
         _tito_cv = getattr(self, "TITO_ACTIVE", None)
         if _tito_cv is None or not _tito_cv.get():
             return None
-        text = str(getattr(self.valves, "TITO_VN_REMINDER", "") or "").strip()
+        valve = self._tito_active_profile()["vn_reminder_valve"]
+        text = str(getattr(self.valves, valve, "") or "").strip()
         extra = (extra_text or "").strip()
         text = "\n\n".join(part for part in (text, extra) if part)
         if not text:
@@ -553,7 +667,7 @@ class PipeTitoMethods:
                 if isinstance(content, list) and any(
                     isinstance(b, dict) and "cache_control" in b for b in content
                 ):
-                    logger.info("[TITO] vn_reminder skipped: breakpoint after last user message")
+                    logger.info(f"{self._tito_tag()} vn_reminder skipped: breakpoint after last user message")
                     return None
             msg = messages[target]
             original = msg.get("content")
@@ -566,7 +680,7 @@ class PipeTitoMethods:
                 return None
             block = {"type": "text", "text": text}
             content.append(block)
-            logger.info("[TITO] vn_reminder chars=%d", len(text))
+            logger.info(f"{self._tito_tag()} vn_reminder chars=%d", len(text))
             return {"block": block, "original": original}
         except Exception as exc:
             self._tito_err("vn_reminder", exc)
@@ -658,7 +772,11 @@ class PipeTitoMethods:
 
     def _tito_decide_enabled(self) -> bool:
         """True when the valve is on and a key is configured."""
-        return bool(getattr(self.valves, "TITO_DECIDE", False)) and bool(self._tito_decide_key())
+        return (
+            self._tito_profile_flag("decide")
+            and bool(getattr(self.valves, "TITO_DECIDE", False))
+            and bool(self._tito_decide_key())
+        )
 
     def _tito_decide_models(self) -> tuple:
         """(main, fallback) decide model ids from the valves; empty valve = class default."""
@@ -776,7 +894,7 @@ class PipeTitoMethods:
                 out[flag] = results.get(flag) or self._tito_decide_fallback(text, flag)
             return out
         except Exception as exc:
-            logger.info("[TITO] decide failed err=%s", type(exc).__name__)
+            logger.info(f"{self._tito_tag()} decide failed err=%s", type(exc).__name__)
             return None
 
     @staticmethod
@@ -814,7 +932,7 @@ class PipeTitoMethods:
                 return None
             return (_aio.ensure_future(self._tito_decide_shadow(text)), time.monotonic())
         except Exception as exc:
-            logger.info("[TITO] decide start failed err=%s", type(exc).__name__)
+            logger.info(f"{self._tito_tag()} decide start failed err=%s", type(exc).__name__)
             return None
 
     async def _tito_decide_collect(self, state) -> None:
@@ -832,23 +950,23 @@ class PipeTitoMethods:
             except _aio.TimeoutError:
                 task.cancel()
                 ms = int((time.monotonic() - t0) * 1000)
-                logger.info("[TITO] decide outcome=timeout ms=%d", ms)
+                logger.info(f"{self._tito_tag()} decide outcome=timeout ms=%d", ms)
                 return
             ms = int((time.monotonic() - t0) * 1000)
             self._tito_decide_log(result, ms)
         except Exception as exc:
-            logger.info("[TITO] decide collect failed err=%s", type(exc).__name__)
+            logger.info(f"{self._tito_tag()} decide collect failed err=%s", type(exc).__name__)
 
     def _tito_decide_log(self, result, ms: int) -> None:
         """The one [TITO] decide line (input flags). Scores and sources only. Never raises."""
         if not result:
-            logger.info("[TITO] decide outcome=none ms=%d", ms)
+            logger.info(f"{self._tito_tag()} decide outcome=none ms=%d", ms)
             return
         parts = []
         for flag, short in self.TITO_DECIDE_LOG_NAMES:
             item = result.get(flag) or {}
             parts.append(f"{short}={float(item.get('p', 0.0)):.2f}({item.get('src', 'regex')})")
-        logger.info("[TITO] decide %s ms=%d", " ".join(parts), ms)
+        logger.info(f"{self._tito_tag()} decide %s ms=%d", " ".join(parts), ms)
 
     def _tito_decide_timeout_s(self) -> float:
         return max(0.1, int(getattr(self.valves, "TITO_DECIDE_TIMEOUT_MS", 1500) or 1500) / 1000)
@@ -871,7 +989,7 @@ class PipeTitoMethods:
                 result = await _aio.wait_for(task, self._tito_decide_timeout_s())
             except _aio.TimeoutError:
                 task.cancel()
-                logger.info("[TITO] decide_inject outcome=timeout")
+                logger.info(f"{self._tito_tag()} decide_inject outcome=timeout")
                 return ""
             self._tito_decide_log(result, int((time.monotonic() - t0) * 1000))
             if not result:
@@ -891,10 +1009,10 @@ class PipeTitoMethods:
                     continue
                 lines.append(line)
                 names.append(flag)
-            logger.info("[TITO] decide_inject flags=%s", ",".join(names) or "none")
+            logger.info(f"{self._tito_tag()} decide_inject flags=%s", ",".join(names) or "none")
             return "\n\n".join(lines)
         except Exception as exc:
-            logger.info("[TITO] decide_inject failed err=%s", type(exc).__name__)
+            logger.info(f"{self._tito_tag()} decide_inject failed err=%s", type(exc).__name__)
             return ""
 
     def _tito_decide_out_start(self, request_ctx, metadata):
@@ -913,7 +1031,7 @@ class PipeTitoMethods:
                 return None
             return (_aio.ensure_future(self._tito_decide_out_call(visible)), time.monotonic())
         except Exception as exc:
-            logger.info("[TITO] decide_out start failed err=%s", type(exc).__name__)
+            logger.info(f"{self._tito_tag()} decide_out start failed err=%s", type(exc).__name__)
             return None
 
     async def _tito_decide_out_call(self, text: str):
@@ -949,9 +1067,9 @@ class PipeTitoMethods:
                 part = f"pure_vn={float(got['p']):.2f}({got['src']})"
             else:
                 part = "pure_vn=-(none)"
-            logger.info("[TITO] decide_out %s guard_trigger=%s ms=%d", part, guard_trigger, ms)
+            logger.info(f"{self._tito_tag()} decide_out %s guard_trigger=%s ms=%d", part, guard_trigger, ms)
         except Exception as exc:
-            logger.info("[TITO] decide_out collect failed err=%s", type(exc).__name__)
+            logger.info(f"{self._tito_tag()} decide_out collect failed err=%s", type(exc).__name__)
 
     def _tito_shrink_images(self, payload: dict) -> dict:
         """Return a payload whose oversized base64 images are downscaled.
@@ -1075,7 +1193,7 @@ class PipeTitoMethods:
             return 0 if value is None else round(((end if end is not None else value) - t0) * 1000)
 
         logger.info(
-            "[TITO] timing ttfb_ms=%d first_text_ms=%d stream_ms=%d guard_ms=%d total_ms=%d "
+            f"{self._tito_tag()} timing ttfb_ms=%d first_text_ms=%d stream_ms=%d guard_ms=%d total_ms=%d "
             "in=%d out=%d cache_read=%d cache_write=%d images=%d image_bytes=%d",
             ms("ttfb"),
             ms("first_text"),
