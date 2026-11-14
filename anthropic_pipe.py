@@ -38,7 +38,7 @@ Supports:
 
 Changelog (older versions: CHANGELOG.md in the repository):
 v0.12.3
-- Tito output guard: paragraphs, lines and list items are held to 1 to 2 short sentences (`MAX_SENTENCES` 2, was 3), each sentence at most 25 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 45 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
+- Tito output guard: paragraphs, lines and list items stay at 1 to 3 sentences (`MAX_SENTENCES` 3, unchanged) and now also get word caps, each sentence at most 25 words (`MAX_SENTENCE_WORDS`) and each paragraph, line or list item at most 45 words (`MAX_UNIT_WORDS`); all three count the same way: whitespace tokens, URLs and short quoted English lines (12 words or fewer) are not counted, and a quote that closes after `.`/`!`/`?` ends its sentence. The rule text the Haiku fixer sees asks for the same limits. Every other trigger is unchanged.
 
 v0.12.2
 - System split (N1) also matches each profile's memory heading (`snapshot_heading`; mimi = "NHỮNG ĐIỀU MIMI NHỚ VỀ BẠN", must match OWUI). Tito heading tried first, unchanged.
@@ -3199,7 +3199,7 @@ TITO_GUARD_MODEL = "claude-haiku-5-5"
 
 # Readability limits for the elderly reader. The rule text and the local
 # pre-check read these same numbers, so they cannot drift apart.
-MAX_SENTENCES = 2  # per paragraph, line or list item
+MAX_SENTENCES = 3  # per paragraph, line or list item
 MAX_SENTENCE_WORDS = 25  # whitespace tokens in one sentence
 MAX_UNIT_WORDS = 45  # whitespace tokens in one paragraph, line or list item
 

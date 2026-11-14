@@ -452,16 +452,12 @@ async def test_list_item_with_four_sentences_is_long_paragraph():
 
 
 async def test_short_list_items_are_fine():
-    """A list of short items passes: the limit is per item, not per block.
-
-    Edited for v0.12.3: the old items had three sentences each (old limit 3);
-    the limit is now two, so each item is trimmed to two sentences.
-    """
+    """A list of short items passes: the limit is per item, not per block."""
     text = (
         "Anh nên làm mấy việc này:\n"
-        "- Kiểm tra máy. Thay dầu nha.\n"
+        "- Kiểm tra máy. Thay dầu nha. Rửa xe luôn.\n"
         "- Mua nước. Hẹn thợ nha.\n"
-        "- Lấy thuốc. Anh thấy sao?"
+        "- Lấy thuốc. Gọi con nha. Anh thấy sao?"
     )
     assert GUARD.tito_guard_trigger(text) is None, GUARD.tito_guard_trigger(text)
 
@@ -498,26 +494,26 @@ def _sentence(n_words: int, end: str = ".") -> str:
     return " ".join(["nhớ"] * (n_words - 1) + [f"anh{end}"])
 
 
-async def test_two_sentences_pass_three_trigger():
-    """Limit is 2 sentences per paragraph (v0.12.3): two pass, three are long."""
-    two = "Hôm nay trời đẹp ghê. Anh ăn cơm chưa?"
-    assert GUARD.tito_guard_trigger(two) is None, GUARD.tito_guard_trigger(two)
-
+async def test_three_sentences_pass_four_trigger():
+    """Limit stays 3 sentences per paragraph for Tito: three pass, four are long."""
     three = "Hôm nay trời đẹp ghê. Tito nấu cơm nha. Anh ăn cơm chưa?"
-    assert GUARD.tito_guard_trigger(three) == "long_paragraph", GUARD.tito_guard_trigger(three)
+    assert GUARD.tito_guard_trigger(three) is None, GUARD.tito_guard_trigger(three)
+
+    four = "Hôm nay trời đẹp ghê. Tito nấu cơm nha. Cơm ngon lắm. Anh ăn cơm chưa?"
+    assert GUARD.tito_guard_trigger(four) == "long_paragraph", GUARD.tito_guard_trigger(four)
 
 
 async def test_closing_quote_ends_a_sentence():
-    """A quote that closes after . ends the sentence: three sentences are long."""
-    text = 'Bác nói: "Được rồi nha." Tito cũng vậy. Anh ăn cơm chưa?'
+    """A quote that closes after . ends the sentence: four sentences are long."""
+    text = 'Bác nói: "Được rồi nha." Tito cũng vậy. Cơm ngon lắm. Anh ăn cơm chưa?'
     assert GUARD.tito_guard_trigger(text) == "long_paragraph", GUARD.tito_guard_trigger(text)
 
 
-async def test_three_sentence_list_item_is_long_paragraph():
-    """Each list item is judged alone: three sentences in one item trigger."""
+async def test_four_sentence_list_item_is_long_paragraph():
+    """Each list item is judged alone: four sentences in one item trigger."""
     text = (
         "Anh nên làm mấy việc này:\n"
-        "- Kiểm tra máy. Thay dầu nha. Rửa xe luôn.\n"
+        "- Kiểm tra máy. Thay dầu nha. Rửa xe luôn. Bơm bánh xe.\n"
         "- Mua nước nha. Anh thấy sao?"
     )
     assert GUARD.tito_guard_trigger(text) == "long_paragraph", GUARD.tito_guard_trigger(text)
@@ -525,7 +521,7 @@ async def test_three_sentence_list_item_is_long_paragraph():
 
 async def test_sentence_word_cap_is_twenty_five():
     """A sentence of 25 words passes; 26 words is long_paragraph."""
-    assert GUARD.MAX_SENTENCE_WORDS == 25 and GUARD.MAX_SENTENCES == 2
+    assert GUARD.MAX_SENTENCE_WORDS == 25 and GUARD.MAX_SENTENCES == 3
     assert GUARD.MAX_UNIT_WORDS == 45
     ok = f"{_sentence(25)} Anh ăn cơm chưa?"
     assert GUARD.tito_guard_trigger(ok) is None, GUARD.tito_guard_trigger(ok)
@@ -568,8 +564,8 @@ async def test_url_is_not_counted_for_words_or_sentences():
     )
     assert GUARD.tito_guard_trigger(with_url) is None, GUARD.tito_guard_trigger(with_url)
 
-    # A URL that ends a sentence still ends it: three sentences stay long.
-    url_end = "Xem https://www.kbb.com/values. Hôm nay trời đẹp ghê. Anh ăn cơm chưa?"
+    # A URL that ends a sentence still ends it: four sentences stay long.
+    url_end = "Xem https://www.kbb.com/values. Hôm nay trời đẹp ghê. Cơm ngon lắm. Anh ăn cơm chưa?"
     assert GUARD.tito_guard_trigger(url_end) == "long_paragraph", GUARD.tito_guard_trigger(url_end)
 
 
