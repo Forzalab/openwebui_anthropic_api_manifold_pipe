@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.12.4`
+- **Current pipe version:** `0.12.5`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
@@ -236,6 +236,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.12.5`
+- mimi thinking back on; deploy with the open-webui build that puts mimi on the Tito path
+
 ### `v0.12.4`
 - Profile key `thinking`: mimi runs without extended thinking (no reasoning block for Conduit to show raw). Tito unchanged
 

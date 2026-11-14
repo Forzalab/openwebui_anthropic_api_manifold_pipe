@@ -26,7 +26,7 @@ def check(name, cond):
 
 
 check("tito thinking on", PM._tito_profile({"model": {"id": "tito"}})["thinking"] is True)
-check("mimi thinking off", PM._tito_profile({"model": {"id": "mimi"}})["thinking"] is False)
+check("mimi thinking on (needs OWUI Tito path)", PM._tito_profile({"model": {"id": "mimi"}})["thinking"] is True)
 check("other model has no profile", PM._tito_profile({"model": {"id": "claude-opus-5-5"}}) is None)
 payload_src = (SRC / "request" / "payload.py").read_text()
 check("payload reads profile thinking", 'bool(_tito_prof.get("thinking", True))' in payload_src)
