@@ -7,6 +7,78 @@ logger = logging.getLogger(__name__)
 
 
 class PipeStreamRuntimeSupportMethods:
+    @staticmethod
+    def _mark_pipe_timing(timing: dict, stage: str) -> None:
+        """Record the first monotonic arrival time of one turn stage."""
+        import time
+
+        timing.setdefault("marks", {}).setdefault(stage, time.monotonic())
+
+    @staticmethod
+    def _pipe_timing_usage(usage: Any) -> dict:
+        """Read the four token counters from an SDK usage object or a dict."""
+        if usage is None:
+            return {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+
+        def _get(name: str) -> int:
+            value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return {
+            "input": _get("input_tokens"),
+            "output": _get("output_tokens"),
+            "cache_read": _get("cache_read_input_tokens"),
+            "cache_create": _get("cache_creation_input_tokens"),
+        }
+
+    def _log_pipe_timing(
+        self,
+        timing: dict,
+        *,
+        run_id: str,
+        model_id: str,
+        usage: Any = None,
+    ) -> None:
+        """Emit exactly one ``[PIPE_TIMING]`` line per turn.
+
+        Offsets are monotonic milliseconds from pipe entry. Only ids and
+        numbers are logged: no message text, prompt, system prompt, location,
+        key or URL can reach this line.
+        """
+        if timing.get("emitted"):
+            return
+        timing["emitted"] = True
+        start = timing.get("start") or 0.0
+        marks = timing.get("marks") or {}
+
+        def _offset(stage: str) -> str:
+            stamp = marks.get(stage)
+            return "na" if stamp is None else f"{(stamp - start) * 1000.0:.1f}"
+
+        counters = self._pipe_timing_usage(usage)
+        logger.info(
+            "[PIPE_TIMING] run=%s model=%s entry=0.0ms payload=%sms client=%sms "
+            "request=%sms ttfb=%sms first_text=%sms stream_end=%sms calls=%s "
+            "events=%s input=%s output=%s cache_read=%s cache_create=%s",
+            run_id,
+            model_id or "?",
+            _offset("payload"),
+            _offset("client"),
+            _offset("request"),
+            _offset("ttfb"),
+            _offset("first_text"),
+            _offset("stream_end"),
+            timing.get("calls", 0),
+            timing.get("events", 0),
+            counters["input"],
+            counters["output"],
+            counters["cache_read"],
+            counters["cache_create"],
+        )
+
     def _handle_message_start_usage(
         self,
         event: Any,
