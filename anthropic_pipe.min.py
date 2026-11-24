@@ -7138,6 +7138,8 @@ class Pipe:
                 continue
         return None
 
+    _anthropic_clients: Dict[tuple, Any] = {}
+
     @classmethod
     def _parse_api_capabilities(cls, model) -> dict:
         caps = getattr(model, "capabilities", None)
@@ -7358,6 +7360,22 @@ class Pipe:
         if ws_id:
             headers.setdefault("anthropic-workspace-id", ws_id)
 
+        cache_key = (
+            hashlib.sha256(api_key.encode("utf-8")).hexdigest(),
+            base_url or "",
+            tuple(
+                sorted(
+                    (k, v)
+                    for k, v in headers.items()
+                    if k.lower() != "x-api-key"
+                )
+            ),
+            timeout,
+        )
+        cached = self._anthropic_clients.get(cache_key)
+        if cached is not None:
+            return cached
+
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
@@ -7365,7 +7383,9 @@ class Pipe:
             kwargs["default_headers"] = headers
         if timeout is not None:
             kwargs["timeout"] = timeout
-        return AsyncAnthropic(**kwargs)
+        client = AsyncAnthropic(**kwargs)
+        self._anthropic_clients[cache_key] = client
+        return client
 
     def _static_fallback_models(self) -> List[dict]:
         return [

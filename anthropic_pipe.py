@@ -8735,6 +8735,13 @@ class Pipe:
                 continue
         return None
 
+    # One AsyncAnthropic per distinct connection config, shared process-wide.
+    # Keys are (sha256(api_key), base_url, sorted headers, timeout): the key
+    # itself never appears, so a dump of this dict cannot leak a credential.
+    # The lookup is sync and this process runs one event loop, so a plain dict
+    # is enough; the client is never closed per request because it outlives it.
+    _anthropic_clients: Dict[tuple, Any] = {}
+
     @classmethod
     def _parse_api_capabilities(cls, model) -> dict:
         """Parse capabilities from an Anthropic API ModelInfo object into our internal format."""
@@ -9029,6 +9036,26 @@ class Pipe:
         if ws_id:
             headers.setdefault("anthropic-workspace-id", ws_id)
 
+        # Cache key: hashed key, endpoint, headers and timeout. The literal
+        # api_key is never a dict key -- it is also filtered out of `headers`
+        # above and re-added below only for custom endpoints, so header values
+        # are safe to compare here.
+        cache_key = (
+            hashlib.sha256(api_key.encode("utf-8")).hexdigest(),
+            base_url or "",
+            tuple(
+                sorted(
+                    (k, v)
+                    for k, v in headers.items()
+                    if k.lower() != "x-api-key"
+                )
+            ),
+            timeout,
+        )
+        cached = self._anthropic_clients.get(cache_key)
+        if cached is not None:
+            return cached
+
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
@@ -9036,7 +9063,9 @@ class Pipe:
             kwargs["default_headers"] = headers
         if timeout is not None:
             kwargs["timeout"] = timeout
-        return AsyncAnthropic(**kwargs)
+        client = AsyncAnthropic(**kwargs)
+        self._anthropic_clients[cache_key] = client
+        return client
 
     def _static_fallback_models(self) -> List[dict]:
         """Model list used when live discovery fails or returns nothing.
