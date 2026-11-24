@@ -23,6 +23,16 @@ class PipeOrchestratorMethods:
         """
         OpenWebUI Claude streaming pipe with integrated streaming logic.
         """
+        # Per-turn stage timing. One summary line is emitted at the end, so a
+        # turn is traceable without a log line per stage.
+        pipe_timing: Dict[str, Any] = {
+            "start": time.monotonic(),
+            "marks": {},
+            "calls": 0,
+            "events": 0,
+            "emitted": False,
+        }
+
         # =========================================================================
         # PHASE 1: RESPONSE ACCUMULATION STATE
         # =========================================================================
@@ -45,6 +55,10 @@ class PipeOrchestratorMethods:
         # Bound here, not only inside the try below: the finalisation phase reads
         # it from outside the try block.
         is_internal = False
+        # Same for the timing line on error paths that return before the loop
+        # ever assigns these.
+        sdk_final_message = None
+        total_usage: Optional[dict[str, int]] = None
 
         # Run marker. Every later lifecycle line carries the same `run=`, so a log
         # window can be split into invocations without guessing from timestamps —
@@ -58,6 +72,14 @@ class PipeOrchestratorMethods:
             (__metadata__ or {}).get("session_id"),
         )
 
+        def emit_pipe_timing() -> None:
+            """Write this turn's single timing line; safe to call on every exit."""
+            self._log_pipe_timing(
+                pipe_timing,
+                run_id=run_id,
+                model_id=body.get("model", "").split("/")[-1],
+                usage=total_usage or getattr(sdk_final_message, "usage", None),
+            )
 
         try:
             # =========================================================================
@@ -224,6 +246,7 @@ class PipeOrchestratorMethods:
             payload, headers, new_marker_metadata, api_tool_names = await self._create_payload(
                 body, __metadata__, __user__, __tools__, __event_emitter__, __files__
             )
+            self._mark_pipe_timing(pipe_timing, "payload")
 
             # =========================================================================
             # PHASE 3: STREAMING STATE INITIALIZATION
@@ -239,12 +262,13 @@ class PipeOrchestratorMethods:
             request_ctx.builtin_tools = builtin_tools
             request_ctx.api_tool_names = api_tool_names
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
+            self._mark_pipe_timing(pipe_timing, "client")
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
                 __user__["valves"].SHOW_TOKEN_COUNT != "Off"
                 or body.get("stream_options", {}).get("include_usage", False)
             )
-            total_usage: Optional[dict[str, int]] = None
+            total_usage = None
             if include_usage:
                 total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "_ctx_input": 0, "_ctx_output": 0}
                 if self.valves.CACHE_CONTROL != "cache disabled":
@@ -360,10 +384,14 @@ class PipeOrchestratorMethods:
                         if payload_for_stream.get("speed") == "fast"
                         else client
                     )
+                    pipe_timing["calls"] += 1
+                    self._mark_pipe_timing(pipe_timing, "request")
                     async with _stream_client.beta.messages.stream(
                         **payload_for_stream
                     ) as stream:
                         async for event in stream:
+                            pipe_timing["events"] += 1
+                            self._mark_pipe_timing(pipe_timing, "ttfb")
                             event_type = getattr(event, "type", None)
                             stream_event_counts[event_type] = stream_event_counts.get(event_type, 0) + 1
                             logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts}")
@@ -430,6 +458,8 @@ class PipeOrchestratorMethods:
                             # Routed by the block type recorded at content_block_start.
                             # ---------------------------------------------------------
                             elif event_type == "content_block_delta":
+                                if getattr(getattr(event, "delta", None), "type", None) == "text_delta":
+                                    self._mark_pipe_timing(pipe_timing, "first_text")
                                 await handler_registry.handle_delta(event, request_ctx)
 
                             # ---------------------------------------------------------
@@ -784,6 +814,7 @@ class PipeOrchestratorMethods:
                                     await self.handle_errors(
                                         stream_error, __event_emitter__
                                     )
+                                    emit_pipe_timing()
                                     return (
                                         final_text()
                                         + f"\n\nAn error occurred: {error_details}"
@@ -798,6 +829,8 @@ class PipeOrchestratorMethods:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
+                    # Latest API call's end; a multi-call turn reports its last.
+                    pipe_timing["marks"]["stream_end"] = time.monotonic()
                     # Log stream event diagnostics
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
@@ -1208,6 +1241,7 @@ class PipeOrchestratorMethods:
                     )
                     if should_retry:
                         continue
+                    emit_pipe_timing()
                     if response_suffix:
                         return final_text() + response_suffix
                     return final_text()
@@ -1240,9 +1274,11 @@ class PipeOrchestratorMethods:
                 )
             except Exception as _cancel_cleanup_err:
                 logger.debug(f"Cancel cleanup emit failed: {_cancel_cleanup_err}")
+            emit_pipe_timing()
             raise
         except Exception as e:
             await self.handle_errors(e, __event_emitter__)
+            emit_pipe_timing()
             return final_text()
 
         # ---------------------------------------------------------
@@ -1485,6 +1521,11 @@ class PipeOrchestratorMethods:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to persist usage to chat_message: {e}")
+
+        # One timing line per successful turn. The usage tally is cumulative
+        # when OpenWebUI asked for it; otherwise the closure falls back to the
+        # last SDK message so the line still carries the API's counters.
+        emit_pipe_timing()
 
         # Non-streaming callers that passed their own `tools` in the request body
         # expect an OpenAI completion object with a real `tool_calls` array --

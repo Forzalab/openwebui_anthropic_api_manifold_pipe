@@ -7921,6 +7921,13 @@ class Pipe:
                 continue
         return None
 
+    # One AsyncAnthropic per distinct connection config, shared process-wide.
+    # Keys are (sha256(api_key), base_url, sorted headers, timeout): the key
+    # itself never appears, so a dump of this dict cannot leak a credential.
+    # The lookup is sync and this process runs one event loop, so a plain dict
+    # is enough; the client is never closed per request because it outlives it.
+    _anthropic_clients: Dict[tuple, Any] = {}
+
     @classmethod
     def _parse_api_capabilities(cls, model) -> dict:
         """Parse capabilities from an Anthropic API ModelInfo object into our internal format."""
@@ -8215,6 +8222,26 @@ class Pipe:
         if ws_id:
             headers.setdefault("anthropic-workspace-id", ws_id)
 
+        # Cache key: hashed key, endpoint, headers and timeout. The literal
+        # api_key is never a dict key -- it is also filtered out of `headers`
+        # above and re-added below only for custom endpoints, so header values
+        # are safe to compare here.
+        cache_key = (
+            hashlib.sha256(api_key.encode("utf-8")).hexdigest(),
+            base_url or "",
+            tuple(
+                sorted(
+                    (k, v)
+                    for k, v in headers.items()
+                    if k.lower() != "x-api-key"
+                )
+            ),
+            timeout,
+        )
+        cached = self._anthropic_clients.get(cache_key)
+        if cached is not None:
+            return cached
+
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
@@ -8222,7 +8249,9 @@ class Pipe:
             kwargs["default_headers"] = headers
         if timeout is not None:
             kwargs["timeout"] = timeout
-        return AsyncAnthropic(**kwargs)
+        client = AsyncAnthropic(**kwargs)
+        self._anthropic_clients[cache_key] = client
+        return client
 
     def _static_fallback_models(self) -> List[dict]:
         """Model list used when live discovery fails or returns nothing.
@@ -8559,6 +8588,78 @@ class Pipe:
                 parts.append(text.strip())
 
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _mark_pipe_timing(timing: dict, stage: str) -> None:
+        """Record the first monotonic arrival time of one turn stage."""
+        import time
+
+        timing.setdefault("marks", {}).setdefault(stage, time.monotonic())
+
+    @staticmethod
+    def _pipe_timing_usage(usage: Any) -> dict:
+        """Read the four token counters from an SDK usage object or a dict."""
+        if usage is None:
+            return {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+
+        def _get(name: str) -> int:
+            value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return {
+            "input": _get("input_tokens"),
+            "output": _get("output_tokens"),
+            "cache_read": _get("cache_read_input_tokens"),
+            "cache_create": _get("cache_creation_input_tokens"),
+        }
+
+    def _log_pipe_timing(
+        self,
+        timing: dict,
+        *,
+        run_id: str,
+        model_id: str,
+        usage: Any = None,
+    ) -> None:
+        """Emit exactly one ``[PIPE_TIMING]`` line per turn.
+
+        Offsets are monotonic milliseconds from pipe entry. Only ids and
+        numbers are logged: no message text, prompt, system prompt, location,
+        key or URL can reach this line.
+        """
+        if timing.get("emitted"):
+            return
+        timing["emitted"] = True
+        start = timing.get("start") or 0.0
+        marks = timing.get("marks") or {}
+
+        def _offset(stage: str) -> str:
+            stamp = marks.get(stage)
+            return "na" if stamp is None else f"{(stamp - start) * 1000.0:.1f}"
+
+        counters = self._pipe_timing_usage(usage)
+        logger.info(
+            "[PIPE_TIMING] run=%s model=%s entry=0.0ms payload=%sms client=%sms "
+            "request=%sms ttfb=%sms first_text=%sms stream_end=%sms calls=%s "
+            "events=%s input=%s output=%s cache_read=%s cache_create=%s",
+            run_id,
+            model_id or "?",
+            _offset("payload"),
+            _offset("client"),
+            _offset("request"),
+            _offset("ttfb"),
+            _offset("first_text"),
+            _offset("stream_end"),
+            timing.get("calls", 0),
+            timing.get("events", 0),
+            counters["input"],
+            counters["output"],
+            counters["cache_read"],
+            counters["cache_create"],
+        )
 
     def _handle_message_start_usage(
         self,
@@ -9174,6 +9275,16 @@ class Pipe:
         """
         OpenWebUI Claude streaming pipe with integrated streaming logic.
         """
+        # Per-turn stage timing. One summary line is emitted at the end, so a
+        # turn is traceable without a log line per stage.
+        pipe_timing: Dict[str, Any] = {
+            "start": time.monotonic(),
+            "marks": {},
+            "calls": 0,
+            "events": 0,
+            "emitted": False,
+        }
+
         # =========================================================================
         # PHASE 1: RESPONSE ACCUMULATION STATE
         # =========================================================================
@@ -9196,6 +9307,10 @@ class Pipe:
         # Bound here, not only inside the try below: the finalisation phase reads
         # it from outside the try block.
         is_internal = False
+        # Same for the timing line on error paths that return before the loop
+        # ever assigns these.
+        sdk_final_message = None
+        total_usage: Optional[dict[str, int]] = None
 
         # Run marker. Every later lifecycle line carries the same `run=`, so a log
         # window can be split into invocations without guessing from timestamps —
@@ -9209,6 +9324,14 @@ class Pipe:
             (__metadata__ or {}).get("session_id"),
         )
 
+        def emit_pipe_timing() -> None:
+            """Write this turn's single timing line; safe to call on every exit."""
+            self._log_pipe_timing(
+                pipe_timing,
+                run_id=run_id,
+                model_id=body.get("model", "").split("/")[-1],
+                usage=total_usage or getattr(sdk_final_message, "usage", None),
+            )
 
         try:
             # =========================================================================
@@ -9375,6 +9498,7 @@ class Pipe:
             payload, headers, new_marker_metadata, api_tool_names = await self._create_payload(
                 body, __metadata__, __user__, __tools__, __event_emitter__, __files__
             )
+            self._mark_pipe_timing(pipe_timing, "payload")
 
             # =========================================================================
             # PHASE 3: STREAMING STATE INITIALIZATION
@@ -9390,12 +9514,13 @@ class Pipe:
             request_ctx.builtin_tools = builtin_tools
             request_ctx.api_tool_names = api_tool_names
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
+            self._mark_pipe_timing(pipe_timing, "client")
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
                 __user__["valves"].SHOW_TOKEN_COUNT != "Off"
                 or body.get("stream_options", {}).get("include_usage", False)
             )
-            total_usage: Optional[dict[str, int]] = None
+            total_usage = None
             if include_usage:
                 total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "_ctx_input": 0, "_ctx_output": 0}
                 if self.valves.CACHE_CONTROL != "cache disabled":
@@ -9511,10 +9636,14 @@ class Pipe:
                         if payload_for_stream.get("speed") == "fast"
                         else client
                     )
+                    pipe_timing["calls"] += 1
+                    self._mark_pipe_timing(pipe_timing, "request")
                     async with _stream_client.beta.messages.stream(
                         **payload_for_stream
                     ) as stream:
                         async for event in stream:
+                            pipe_timing["events"] += 1
+                            self._mark_pipe_timing(pipe_timing, "ttfb")
                             event_type = getattr(event, "type", None)
                             stream_event_counts[event_type] = stream_event_counts.get(event_type, 0) + 1
                             logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts}")
@@ -9581,6 +9710,8 @@ class Pipe:
                             # Routed by the block type recorded at content_block_start.
                             # ---------------------------------------------------------
                             elif event_type == "content_block_delta":
+                                if getattr(getattr(event, "delta", None), "type", None) == "text_delta":
+                                    self._mark_pipe_timing(pipe_timing, "first_text")
                                 await handler_registry.handle_delta(event, request_ctx)
 
                             # ---------------------------------------------------------
@@ -9935,6 +10066,7 @@ class Pipe:
                                     await self.handle_errors(
                                         stream_error, __event_emitter__
                                     )
+                                    emit_pipe_timing()
                                     return (
                                         final_text()
                                         + f"\n\nAn error occurred: {error_details}"
@@ -9949,6 +10081,8 @@ class Pipe:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
+                    # Latest API call's end; a multi-call turn reports its last.
+                    pipe_timing["marks"]["stream_end"] = time.monotonic()
                     # Log stream event diagnostics
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
@@ -10359,6 +10493,7 @@ class Pipe:
                     )
                     if should_retry:
                         continue
+                    emit_pipe_timing()
                     if response_suffix:
                         return final_text() + response_suffix
                     return final_text()
@@ -10391,9 +10526,11 @@ class Pipe:
                 )
             except Exception as _cancel_cleanup_err:
                 logger.debug(f"Cancel cleanup emit failed: {_cancel_cleanup_err}")
+            emit_pipe_timing()
             raise
         except Exception as e:
             await self.handle_errors(e, __event_emitter__)
+            emit_pipe_timing()
             return final_text()
 
         # ---------------------------------------------------------
@@ -10636,6 +10773,11 @@ class Pipe:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to persist usage to chat_message: {e}")
+
+        # One timing line per successful turn. The usage tally is cumulative
+        # when OpenWebUI asked for it; otherwise the closure falls back to the
+        # last SDK message so the line still carries the API's counters.
+        emit_pipe_timing()
 
         # Non-streaming callers that passed their own `tools` in the request body
         # expect an OpenAI completion object with a real `tool_calls` array --
