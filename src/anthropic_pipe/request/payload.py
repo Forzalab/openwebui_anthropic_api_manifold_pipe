@@ -87,8 +87,11 @@ async def create_request_payload(
 
         body_effort = body.get("reasoning_effort")
         if is_tito:
-            # Tito: reasoning_effort is ignored; effort is pinned to TITO_CONFIG.
-            effective_effort = str(_tito_cfg.get("effort") or "medium")
+            # Tito: reasoning_effort is ignored; effort is pinned to TITO_CONFIG,
+            # unless the profile pins its own (mimi: "low", Tony 2026-11-23).
+            _pf = getattr(pipe, "_tito_profile", None)
+            _pe = ((_pf(__metadata__) if callable(_pf) else None) or {}).get("effort")
+            effective_effort = str(_pe or _tito_cfg.get("effort") or "medium")
         elif body_effort in ("low", "medium", "high", "xhigh", "max"):
             effective_effort = _clamp_effort(body_effort)
         else:
@@ -362,6 +365,10 @@ async def create_request_payload(
     activate_code_execution = __metadata__.get(
         "activate_code_execution_tool", False
     )
+
+    # Tito: per-user opt-in (off by default) for Anthropic's hosted sandbox.
+    if getattr((__user__ or {}).get("valves"), "ENABLE_CODE_EXECUTION", False):
+        activate_code_execution = True
 
     # Auto-enable code execution when Files API uploaded files (container_upload needs it)
     if has_files_api_uploads:

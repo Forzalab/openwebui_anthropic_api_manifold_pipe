@@ -65,7 +65,7 @@ v0.11.8
 - Tito decide: casual_chat question rewritten (scenario + literal-listener reading in its own instructions); held-out AUC .99 Jev / .86 MSD on 12 labeled messages.
 
 v0.11.7
-- Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
+- Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1.1-20261117` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
 v0.11.6
 - Tito decide shadow: new input flag `casual_chat` (casual chat about his day or feelings vs. a request for information, advice or a decision; prompt has chat and ask examples; no regex fallback, MSD failure gives no score). New output check `pure_vn` on the visible reply (fully natural Vietnamese, English only for names, brands, short terms and URLs), started with the output guard and logged as one `[TITO] decide_out` line with the guard trigger. Valve `TITO_DECIDE_INJECT` (default off): when on, the input flags are awaited before the main call and the lines of MSD-scored flags above threshold are added as one block in the VN reminder slot. Log only otherwise; fails open.
 
@@ -1118,7 +1118,7 @@ class Pipe:
             description="Tito only. Main model id for the TITO_DECIDE calls (OpenRouter decisions endpoint).",
         )
         TITO_DECIDE_FALLBACK_MODEL: str = Field(
-            default="microsoft/microsoft-decision-1",
+            default="microsoft/microsoft-decision-1.1-20261117",
             description="Tito only. Fallback model id for TITO_DECIDE, asked only when the main model call fails.",
         )
         TITO_DECIDE_KEY: EncryptedStr = Field(
@@ -1310,6 +1310,10 @@ class Pipe:
         )
 
     class UserValves(BaseModel):
+        ENABLE_CODE_EXECUTION: bool = Field(
+            default=False,
+            description="Tito: let the model run code in Anthropic's hosted sandbox (billed).",
+        )
         ANTHROPIC_API_KEY: EncryptedStr = Field(
             default="",
             description="Overrides the admin-configured API key. "

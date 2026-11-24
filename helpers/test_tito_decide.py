@@ -36,7 +36,7 @@ MESSAGE = "SECRET-MESSAGE-TEXT giá xe này bao nhiêu"
 REPLY = "SECRET-REPLY-TEXT Tito chào anh, giá tốt đó."
 META = {"model": {"id": "tito"}}
 JEV = "~typesafe/jev-latest"
-MSD = "microsoft/microsoft-decision-1"
+MSD = "microsoft/microsoft-decision-1.1-20261117"
 IN_TEXT = ("The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad "
            "in Fresno to a friendly chat companion. Judge the message as written.")
 OUT_TEXT = ("The state is one reply, in Vietnamese, from a friendly chat companion to an elderly "
