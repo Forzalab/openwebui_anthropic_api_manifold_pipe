@@ -109,7 +109,11 @@ class PipeTitoMethods:
             # Thinking on (Tony picked A): the OWUI Tito path (open-webui
             # is_tito_model incl. mimi) renders the reasoning block folded, like
             # Tito. Set False again if mimi runs on an OWUI without that path.
-            "thinking": True,
+            # 2026-11-23 Tony: thinking OFF for mimi (latency: ~1000 of ~1100
+            # output tokens were thinking; Ngan's asks are short how-tos).
+            "thinking": False,
+            # 2026-11-23 Tony: "low effort, she wants fast" (Haiku 5.5, thinking off).
+            "effort": "low",
             # Conduit shows <details type="reasoning"> raw, so mimi's thinking is
             # sent only as the invisible [anthropic-hidden] carrier (still replayed).
             "hide_thinking": True,
@@ -802,7 +806,7 @@ class PipeTitoMethods:
     TITO_DECIDE_URL = "https://openrouter.ai/api/alpha/decisions"
     # Main model first; the fallback is asked only when the main call fails, within the same budget.
     TITO_DECIDE_MODEL = "~typesafe/jev-latest"
-    TITO_DECIDE_FALLBACK_MODEL = "microsoft/microsoft-decision-1"
+    TITO_DECIDE_FALLBACK_MODEL = "microsoft/microsoft-decision-1.1-20261117"
     # Every question carries an "instructions" field (some decision models reject questions without it).
     TITO_DECIDE_IN_INSTRUCTIONS = "The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad in Fresno to a friendly chat companion. Judge the message as written."
     TITO_DECIDE_OUT_INSTRUCTIONS = "The state is one reply, in Vietnamese, from a friendly chat companion to an elderly Vietnamese immigrant dad. Judge the reply as written."

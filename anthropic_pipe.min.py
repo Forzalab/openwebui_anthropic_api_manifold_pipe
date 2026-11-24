@@ -65,7 +65,7 @@ v0.11.8
 - Tito decide: casual_chat question rewritten (scenario + literal-listener reading in its own instructions); held-out AUC .99 Jev / .86 MSD on 12 labeled messages.
 
 v0.11.7
-- Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
+- Tito decide: main model `~typesafe/jev-latest` (valve `TITO_DECIDE_MODEL`), fallback `microsoft/microsoft-decision-1.1-20261117` (valve `TITO_DECIDE_FALLBACK_MODEL`) asked only when the main call fails, within the same `TITO_DECIDE_TIMEOUT_MS` budget per flag; then the regex (casual_chat: none). Every question carries an `instructions` field. Input flags are judged as chat messages, the `pure_vn` output check as replies. Log source per flag is jev, msd, regex or none. The fourth input flag (story) is dropped.
 v0.11.6
 - Tito decide shadow: new input flag `casual_chat` (casual chat about his day or feelings vs. a request for information, advice or a decision; prompt has chat and ask examples; no regex fallback, MSD failure gives no score). New output check `pure_vn` on the visible reply (fully natural Vietnamese, English only for names, brands, short terms and URLs), started with the output guard and logged as one `[TITO] decide_out` line with the guard trigger. Valve `TITO_DECIDE_INJECT` (default off): when on, the input flags are awaited before the main call and the lines of MSD-scored flags above threshold are added as one block in the VN reminder slot. Log only otherwise; fails open.
 
@@ -686,7 +686,9 @@ async def create_request_payload(
         body_effort = body.get("reasoning_effort")
         if is_tito:
 
-            effective_effort = str(_tito_cfg.get("effort") or "medium")
+            _pf = getattr(pipe, "_tito_profile", None)
+            _pe = ((_pf(__metadata__) if callable(_pf) else None) or {}).get("effort")
+            effective_effort = str(_pe or _tito_cfg.get("effort") or "medium")
         elif body_effort in ("low", "medium", "high", "xhigh", "max"):
             effective_effort = _clamp_effort(body_effort)
         else:
@@ -918,6 +920,9 @@ async def create_request_payload(
     activate_code_execution = __metadata__.get(
         "activate_code_execution_tool", False
     )
+
+    if getattr((__user__ or {}).get("valves"), "ENABLE_CODE_EXECUTION", False):
+        activate_code_execution = True
 
     if has_files_api_uploads:
         activate_code_execution = True
@@ -3556,7 +3561,7 @@ class Pipe:
             description="Tito only. Main model id for the TITO_DECIDE calls (OpenRouter decisions endpoint).",
         )
         TITO_DECIDE_FALLBACK_MODEL: str = Field(
-            default="microsoft/microsoft-decision-1",
+            default="microsoft/microsoft-decision-1.1-20261117",
             description="Tito only. Fallback model id for TITO_DECIDE, asked only when the main model call fails.",
         )
         TITO_DECIDE_KEY: EncryptedStr = Field(
@@ -3748,6 +3753,10 @@ class Pipe:
         )
 
     class UserValves(BaseModel):
+        ENABLE_CODE_EXECUTION: bool = Field(
+            default=False,
+            description="Tito: let the model run code in Anthropic's hosted sandbox (billed).",
+        )
         ANTHROPIC_API_KEY: EncryptedStr = Field(
             default="",
             description="Overrides the admin-configured API key. "
@@ -7316,7 +7325,8 @@ class Pipe:
                     ))
                 return models
 
-            return models
+            logging.warning("No capability cache; using static fallback model list")
+            return self._static_fallback_models()
 
     @staticmethod
     def _build_openwebui_model_entry(
@@ -9646,7 +9656,9 @@ class Pipe:
             "decide": False,
             "injects": True,
 
-            "thinking": True,
+            "thinking": False,
+
+            "effort": "low",
 
             "hide_thinking": True,
             "vn_reminder_valve": "MIMI_VN_REMINDER",
@@ -10232,7 +10244,7 @@ class Pipe:
     TITO_DECIDE_URL = "https://openrouter.ai/api/alpha/decisions"
 
     TITO_DECIDE_MODEL = "~typesafe/jev-latest"
-    TITO_DECIDE_FALLBACK_MODEL = "microsoft/microsoft-decision-1"
+    TITO_DECIDE_FALLBACK_MODEL = "microsoft/microsoft-decision-1.1-20261117"
 
     TITO_DECIDE_IN_INSTRUCTIONS = "The state is one chat message, in Vietnamese, from an elderly Vietnamese immigrant dad in Fresno to a friendly chat companion. Judge the message as written."
     TITO_DECIDE_OUT_INSTRUCTIONS = "The state is one reply, in Vietnamese, from a friendly chat companion to an elderly Vietnamese immigrant dad. Judge the reply as written."

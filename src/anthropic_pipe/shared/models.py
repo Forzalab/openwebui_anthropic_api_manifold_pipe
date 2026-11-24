@@ -245,8 +245,11 @@ class PipeModelSupportMethods:
                         name, info, info.get("_display_name", "")
                     ))
                 return models
-            # No cache available — return empty (API key likely invalid)
-            return models
+            # No cache available (e.g. fresh restart + rejected key): keep the
+            # known models visible so chats reach the pipe and show the Tito
+            # error text + Discord alert instead of an empty model list.
+            logging.warning("No capability cache; using static fallback model list")
+            return self._static_fallback_models()
 
     @staticmethod
     def _build_openwebui_model_entry(
