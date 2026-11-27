@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.12.6`
+- **Current pipe version:** `0.12.7`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
@@ -236,6 +236,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.12.7`
+- mimi profile thinking ON (effort low, hidden carrier)
+
 ### `v0.12.6`
 - mimi: thinking hidden (invisible carrier, still replayed); no `<details>` reaches Conduit. Tito unchanged
 

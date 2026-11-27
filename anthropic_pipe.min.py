@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.6
+version: 0.12.7
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.7
+- mimi profile thinking ON (effort low, hidden carrier).
+
 v0.12.6
 - Profile key `hide_thinking` (mimi): thinking stays on but is never shown; the finished block rides the invisible `[anthropic-hidden]` carrier and replays next turn. Tito unchanged.
 
@@ -9656,7 +9659,7 @@ class Pipe:
             "decide": False,
             "injects": True,
 
-            "thinking": False,
+            "thinking": True,
 
             "effort": "low",
 

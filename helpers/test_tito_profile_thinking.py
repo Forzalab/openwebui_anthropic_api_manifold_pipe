@@ -1,4 +1,4 @@
-"""Regression test: per-profile thinking switch (tito on, mimi off, others untouched).
+"""Regression test: per-profile thinking switch (tito on, mimi on, others untouched).
 
 Usage:
     python helpers/test_tito_profile_thinking.py
@@ -26,7 +26,7 @@ def check(name, cond):
 
 
 check("tito thinking on", PM._tito_profile({"model": {"id": "tito"}})["thinking"] is True)
-check("mimi thinking off + effort low (Tony 2026-11-23)", PM._tito_profile({"model": {"id": "mimi"}})["thinking"] is False and PM._tito_profile({"model": {"id": "mimi"}})["effort"] == "low")
+check("mimi thinking on + effort low (Tony 2026-11-26)", PM._tito_profile({"model": {"id": "mimi"}})["thinking"] is True and PM._tito_profile({"model": {"id": "mimi"}})["effort"] == "low")
 check("other model has no profile", PM._tito_profile({"model": {"id": "claude-opus-5-5"}}) is None)
 payload_src = (SRC / "request" / "payload.py").read_text()
 check("payload reads profile thinking", 'bool(_tito_prof.get("thinking", True))' in payload_src)
