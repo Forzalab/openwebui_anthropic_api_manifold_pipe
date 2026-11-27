@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.12.6
+version: 0.12.7
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.12.7
+- mimi profile thinking ON (effort low, hidden carrier).
+
 v0.12.6
 - Profile key `hide_thinking` (mimi): thinking stays on but is never shown; the finished block rides the invisible `[anthropic-hidden]` carrier and replays next turn. Tito unchanged.
 
@@ -11920,12 +11923,8 @@ class Pipe:
             "guard": False,
             "decide": False,
             "injects": True,
-            # Thinking on (Tony picked A): the OWUI Tito path (open-webui
-            # is_tito_model incl. mimi) renders the reasoning block folded, like
-            # Tito. Set False again if mimi runs on an OWUI without that path.
-            # 2026-11-23 Tony: thinking OFF for mimi (latency: ~1000 of ~1100
-            # output tokens were thinking; Ngan's asks are short how-tos).
-            "thinking": False,
+            # 2026-11-26 Tony: thinking ON again at effort low (latency bench); hide_thinking keeps it invisible.
+            "thinking": True,
             # 2026-11-23 Tony: "low effort, she wants fast" (Haiku 5.5, thinking off).
             "effort": "low",
             # Conduit shows <details type="reasoning"> raw, so mimi's thinking is

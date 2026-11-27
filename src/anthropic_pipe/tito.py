@@ -106,12 +106,8 @@ class PipeTitoMethods:
             "guard": False,
             "decide": False,
             "injects": True,
-            # Thinking on (Tony picked A): the OWUI Tito path (open-webui
-            # is_tito_model incl. mimi) renders the reasoning block folded, like
-            # Tito. Set False again if mimi runs on an OWUI without that path.
-            # 2026-11-23 Tony: thinking OFF for mimi (latency: ~1000 of ~1100
-            # output tokens were thinking; Ngan's asks are short how-tos).
-            "thinking": False,
+            # 2026-11-26 Tony: thinking ON again at effort low (latency bench); hide_thinking keeps it invisible.
+            "thinking": True,
             # 2026-11-23 Tony: "low effort, she wants fast" (Haiku 5.5, thinking off).
             "effort": "low",
             # Conduit shows <details type="reasoning"> raw, so mimi's thinking is
